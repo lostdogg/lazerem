@@ -11,9 +11,17 @@ from typing import Optional
 from ..machine import LaserMachine
 from ..design import DesignPath, array_path, nest_paths, offset_path, paths_to_gcode
 from ..parser import parse_program
+from ..job_queue import JobQueue, QueuedJob
+from ..cost_estimator import CostEstimator
+from ..path_optimizer import PathOptimizer
+from ..error_monitor import ErrorMonitor
+from ..plugin_manager import PluginManager
 from .canvas import BurnPathCanvas
 from .panels import AdvancedSettingsPanel, CoordinatePanel, LaserStatusPanel, MessageLog
 from .design_panel import DesignPanel
+from .simulation_canvas import SimulationCanvas
+from .job_queue_panel import JobQueuePanel
+from .cost_panel import CostPanel
 
 
 _DARK_BG = "#0d1a0d"
@@ -51,6 +59,14 @@ class App(tk.Tk):
 
         self._machine = LaserMachine()
         self._run_thread: Optional[threading.Thread] = None
+        self._job_queue = JobQueue()
+        self._plugin_manager = PluginManager()
+        self._plugin_manager.load_all()
+        self._optimizer = PathOptimizer()
+        self._error_monitor = ErrorMonitor(
+            self._machine,
+            on_alert=self._on_monitor_alert,
+        )
 
         # Live preview – redraw canvas every N blocks while running
         self._live_preview: bool = True
@@ -156,6 +172,44 @@ class App(tk.Tk):
         )
         right_nb.add(self._design_panel, text="Design")
 
+        # Tab 3: 3-D Simulation
+        sim_tab = tk.Frame(right_nb, bg=_DARK_BG)
+        right_nb.add(sim_tab, text="Simulate")
+
+        tk.Label(sim_tab, text="3-D ENGRAVE SIMULATION", bg=_DARK_BG,
+                 fg="#4a9a4a", font=_MONO_SM).pack(anchor="w", padx=4, pady=(4, 0))
+
+        self._sim_canvas = SimulationCanvas(sim_tab)
+        self._sim_canvas.pack(fill="both", expand=True, padx=4, pady=4)
+
+        sim_btn_row = tk.Frame(sim_tab, bg=_DARK_BG)
+        sim_btn_row.pack(fill="x", padx=4, pady=2)
+        _btn_s = dict(bg="#1a4a1a", fg="#ccffcc",
+                      activebackground="#2a6a2a", activeforeground="#ffffff",
+                      relief="flat", padx=8, pady=2, font=_MONO_SM, cursor="hand2")
+        tk.Button(sim_btn_row, text="⟳ Re-Simulate",
+                  command=self._run_simulation, **_btn_s).pack(side="left", padx=2)
+        tk.Button(sim_btn_row, text="✗ Clear",
+                  command=self._sim_canvas.clear, **_btn_s).pack(side="left", padx=2)
+
+        # Tab 4: Job Queue
+        self._queue_panel = JobQueuePanel(
+            right_nb,
+            queue=self._job_queue,
+            on_run_all=self._run_queue_all,
+            on_run_next=self._run_queue_next,
+            get_gcode=lambda: self._editor.get("1.0", "end-1c"),
+        )
+        right_nb.add(self._queue_panel, text="Queue")
+
+        # Tab 5: Cost Estimator
+        self._cost_panel = CostPanel(
+            right_nb,
+            get_burn_path=lambda: list(self._machine.burn_path),
+            get_feed_rate=lambda: self._machine.feed_rate,
+        )
+        right_nb.add(self._cost_panel, text="Cost")
+
         # --- MDI bar ---
         self._build_mdi_bar()
 
@@ -225,6 +279,29 @@ class App(tk.Tk):
         design_menu.add_command(label="Boolean Union",
                                 command=self._boolean_union_noop)
         menubar.add_cascade(label="Design", menu=design_menu)
+
+        # ---- Tools ----
+        tools_menu = tk.Menu(menubar, tearoff=False, bg="#0f2a0f",
+                             fg="#ccffcc", activebackground="#1a4a1a",
+                             activeforeground="#ffffff")
+        tools_menu.add_command(label="Optimize Path (AI)…",
+                               command=self._optimize_path)
+        tools_menu.add_command(label="Estimate Job Cost",
+                               command=self._open_cost_tab)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Gradient Fill…",
+                               command=self._prompt_gradient_fill)
+        tools_menu.add_command(label="Texture Fill…",
+                               command=self._prompt_texture_fill)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Batch Queue",
+                               command=self._open_queue_tab)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Reload Plugins",
+                               command=self._reload_plugins)
+        tools_menu.add_command(label="Plugin Info…",
+                               command=self._show_plugin_info)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
 
         # ---- Help ----
         help_menu = tk.Menu(menubar, tearoff=False, bg="#0f2a0f",
@@ -696,6 +773,226 @@ class App(tk.Tk):
         )
 
     # ------------------------------------------------------------------
+    # Tools menu actions
+    # ------------------------------------------------------------------
+
+    def _optimize_path(self) -> None:
+        paths = self._current_paths()
+        if not paths:
+            messagebox.showinfo("Optimize", "No path found in editor.", parent=self)
+            return
+        try:
+            power = float(self._power_var.get())
+            speed = float(self._feed_var.get())
+        except ValueError:
+            power, speed = 500.0, 3000.0
+        optimized, result = self._optimizer.optimize(paths)
+        gcode = paths_to_gcode(optimized, power, speed)
+        self._editor.delete("1.0", "end")
+        self._editor.insert("1.0", gcode)
+        self._log.log(
+            f"Path optimized: rapid {result.original_rapid_mm:.1f}mm → "
+            f"{result.optimised_rapid_mm:.1f}mm "
+            f"({result.rapid_saving_pct:.0f}% saved)  "
+            f"segments merged: {result.segments_merged}"
+        )
+
+    def _open_cost_tab(self) -> None:
+        """Switch the right notebook to the Cost tab."""
+        parent = self._cost_panel.master
+        if isinstance(parent, ttk.Notebook):
+            idx = parent.index(self._cost_panel)
+            parent.select(idx)
+
+    def _open_queue_tab(self) -> None:
+        """Switch the right notebook to the Queue tab."""
+        parent = self._queue_panel.master
+        if isinstance(parent, ttk.Notebook):
+            idx = parent.index(self._queue_panel)
+            parent.select(idx)
+
+    def _prompt_gradient_fill(self) -> None:
+        from ..layer_effects import gradient_fill
+        dlg = tk.Toplevel(self)
+        dlg.title("Gradient Fill")
+        dlg.configure(bg="#0d1a0d")
+        dlg.resizable(False, False)
+        fields = [
+            ("X start (mm)", "0.0"),
+            ("Y start (mm)", "0.0"),
+            ("X end (mm)", "40.0"),
+            ("Y end (mm)", "40.0"),
+            ("Power start (S)", "100"),
+            ("Power end (S)", "1000"),
+            ("Line spacing (mm)", "0.1"),
+            ("Speed (mm/min)", "3000"),
+        ]
+        vars_ = []
+        for i, (lbl, default) in enumerate(fields):
+            tk.Label(dlg, text=lbl, bg="#0d1a0d", fg="#7abf7a",
+                     font=_MONO_SM).grid(row=i, column=0, sticky="w", padx=8, pady=2)
+            v = tk.StringVar(value=default)
+            tk.Entry(dlg, textvariable=v, bg="#071407", fg="#00ff88",
+                     font=_MONO_SM, width=10).grid(row=i, column=1, padx=8)
+            vars_.append(v)
+
+        def _ok():
+            try:
+                x0, y0 = float(vars_[0].get()), float(vars_[1].get())
+                x1, y1 = float(vars_[2].get()), float(vars_[3].get())
+                ps, pe = float(vars_[4].get()), float(vars_[5].get())
+                sp, spd = float(vars_[6].get()), float(vars_[7].get())
+            except ValueError:
+                messagebox.showerror("Error", "Invalid values.", parent=dlg)
+                return
+            dlg.destroy()
+            gcode = gradient_fill(x0, y0, x1, y1,
+                                  power_start=ps, power_end=pe,
+                                  line_spacing=sp, speed=spd)
+            self._editor.delete("1.0", "end")
+            self._editor.insert("1.0", gcode)
+            self._log.log(f"Gradient fill {x0},{y0}→{x1},{y1}")
+
+        tk.Button(dlg, text="OK", command=_ok,
+                  bg="#1a4a1a", fg="#ccffcc", font=_MONO_SM).grid(
+            row=len(fields), column=0, columnspan=2, pady=8)
+
+    def _prompt_texture_fill(self) -> None:
+        from ..layer_effects import texture_fill
+        dlg = tk.Toplevel(self)
+        dlg.title("Texture Fill")
+        dlg.configure(bg="#0d1a0d")
+        dlg.resizable(False, False)
+        fields = [
+            ("X start (mm)", "0.0"),
+            ("Y start (mm)", "0.0"),
+            ("X end (mm)", "40.0"),
+            ("Y end (mm)", "40.0"),
+            ("Pitch (mm)", "1.0"),
+            ("Power (S)", "500"),
+            ("Speed (mm/min)", "3000"),
+            ("Dot size (mm)", "0.2"),
+        ]
+        vars_ = []
+        for i, (lbl, default) in enumerate(fields):
+            tk.Label(dlg, text=lbl, bg="#0d1a0d", fg="#7abf7a",
+                     font=_MONO_SM).grid(row=i, column=0, sticky="w", padx=8, pady=2)
+            v = tk.StringVar(value=default)
+            tk.Entry(dlg, textvariable=v, bg="#071407", fg="#00ff88",
+                     font=_MONO_SM, width=10).grid(row=i, column=1, padx=8)
+            vars_.append(v)
+
+        pattern_var = tk.StringVar(value="dot")
+        tk.Label(dlg, text="Pattern", bg="#0d1a0d", fg="#7abf7a",
+                 font=_MONO_SM).grid(row=len(fields), column=0, sticky="w", padx=8)
+        tk.OptionMenu(dlg, pattern_var, "dot", "line", "cross").grid(
+            row=len(fields), column=1, padx=8, pady=2)
+
+        def _ok():
+            try:
+                x0, y0 = float(vars_[0].get()), float(vars_[1].get())
+                x1, y1 = float(vars_[2].get()), float(vars_[3].get())
+                pitch = float(vars_[4].get())
+                power = float(vars_[5].get())
+                speed = float(vars_[6].get())
+                dot_size = float(vars_[7].get())
+            except ValueError:
+                messagebox.showerror("Error", "Invalid values.", parent=dlg)
+                return
+            dlg.destroy()
+            gcode = texture_fill(x0, y0, x1, y1, pattern=pattern_var.get(),
+                                 pitch=pitch, power=power, speed=speed,
+                                 dot_size=dot_size)
+            self._editor.delete("1.0", "end")
+            self._editor.insert("1.0", gcode)
+            self._log.log(f"Texture fill {pattern_var.get()}")
+
+        tk.Button(dlg, text="OK", command=_ok,
+                  bg="#1a4a1a", fg="#ccffcc", font=_MONO_SM).grid(
+            row=len(fields) + 1, column=0, columnspan=2, pady=8)
+
+    def _reload_plugins(self) -> None:
+        self._plugin_manager = PluginManager()
+        count = self._plugin_manager.load_all()
+        self._log.log(f"Plugins reloaded: {count} loaded.")
+
+    def _show_plugin_info(self) -> None:
+        info = self._plugin_manager.plugin_info()
+        errors = self._plugin_manager.errors()
+        if not info and not errors:
+            msg = "No plugins loaded.\nPlace .py files in ~/.lazerem/plugins/"
+        else:
+            parts = [f"{p['name']} v{p['version']}"
+                     + (f"\n  {p['description']}" if p["description"] else "")
+                     for p in info]
+            msg = "\n\n".join(parts) if parts else "No plugins."
+            if errors:
+                msg += "\n\nErrors:\n" + "\n".join(errors)
+        messagebox.showinfo("Plugin Info", msg, parent=self)
+
+    # ------------------------------------------------------------------
+    # Simulation
+    # ------------------------------------------------------------------
+
+    def _run_simulation(self) -> None:
+        self._sim_canvas.update_simulation(list(self._machine.burn_path))
+        self._log.log("3-D simulation updated.")
+
+    # ------------------------------------------------------------------
+    # Error monitor callback
+    # ------------------------------------------------------------------
+
+    def _on_monitor_alert(self, alert) -> None:
+        self.after(0, self._log.log,
+                   f"⚠ [{alert.severity.upper()}] {alert.code}: {alert.message}")
+
+    # ------------------------------------------------------------------
+    # Job queue actions
+    # ------------------------------------------------------------------
+
+    def _run_queue_all(self) -> None:
+        if self._run_thread and self._run_thread.is_alive():
+            messagebox.showwarning("Busy", "A job is already running.", parent=self)
+            return
+
+        def _worker() -> None:
+            for job, msgs in self._job_queue.run_all(self._machine):
+                self.after(0, self._queue_panel.refresh)
+                self.after(0, self._log.log,
+                           f"Queue: {job.name} → {job.status} "
+                           f"({job.elapsed:.1f}s)")
+                for m in msgs:
+                    self.after(0, self._log.log, m)
+            self.after(0, self._refresh_panels)
+            self.after(0, lambda: self._canvas.set_burn_path(
+                list(self._machine.burn_path),
+                self._machine.position.as_tuple()))
+
+        self._run_thread = threading.Thread(target=_worker, daemon=True)
+        self._run_thread.start()
+
+    def _run_queue_next(self) -> None:
+        if self._run_thread and self._run_thread.is_alive():
+            messagebox.showwarning("Busy", "A job is already running.", parent=self)
+            return
+
+        def _worker() -> None:
+            result = self._job_queue.run_next(self._machine)
+            if result:
+                job, msgs = result
+                self.after(0, self._queue_panel.refresh)
+                self.after(0, self._log.log,
+                           f"Queue next: {job.name} → {job.status}")
+                for m in msgs:
+                    self.after(0, self._log.log, m)
+            else:
+                self.after(0, self._log.log, "Queue: no pending jobs.")
+            self.after(0, self._refresh_panels)
+
+        self._run_thread = threading.Thread(target=_worker, daemon=True)
+        self._run_thread.start()
+
+    # ------------------------------------------------------------------
     # Machine / execution actions
     # ------------------------------------------------------------------
 
@@ -743,7 +1040,9 @@ class App(tk.Tk):
                                (pos.x, pos.y))
 
         def _worker():
+            self._error_monitor.start()
             messages = self._machine.run_program(source, on_block=_on_block)
+            self._error_monitor.stop()
             self.after(0, self._on_run_complete, messages)
 
         self._run_thread = threading.Thread(target=_worker, daemon=True)
@@ -760,6 +1059,8 @@ class App(tk.Tk):
         )
         self._canvas.fit_all()
         self._refresh_panels()
+        # Auto-update simulation
+        self._sim_canvas.update_simulation(list(self._machine.burn_path))
 
     def _stop_program(self) -> None:
         self._machine.program_stopped = True
@@ -795,7 +1096,7 @@ class App(tk.Tk):
         messagebox.showinfo(
             "About Ray5W Laser Control",
             "Ray5W Laser Control\n"
-            "Version 2.0.0\n\n"
+            "Version 3.0.0\n\n"
             "GRBL-style G-code interpreter and burn-path visualiser\n"
             "for the Ray5W diode laser engraver.\n\n"
             "Design capabilities:\n"
@@ -805,7 +1106,15 @@ class App(tk.Tk):
             "  Path offset (kerf compensation)\n"
             "  Array / grid tool\n"
             "  Auto-nesting (shelf algorithm)\n"
-            "  Material library (JSON presets)\n\n"
+            "  Material library (JSON presets)\n"
+            "  Gradient fill / Texture fill\n"
+            "  AI path optimiser (nearest-neighbour TSP)\n\n"
+            "Advanced features:\n"
+            "  3-D engraving depth-map simulation\n"
+            "  Batch job queue\n"
+            "  Job cost estimator\n"
+            "  Real-time error / thermal monitoring\n"
+            "  Plugin / extension system\n\n"
             "G-code:\n"
             "  G0/G1 – Rapid / Cut\n"
             "  G2/G3 – Circular arcs\n"
