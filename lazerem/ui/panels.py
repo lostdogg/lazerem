@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Optional
 import tkinter as tk
+from tkinter import ttk
 
 from ..machine import LaserMachine
 
@@ -98,6 +100,73 @@ class LaserStatusPanel(tk.Frame):
         self._vars["mode"].set(
             "ABSOLUTE" if machine.distance_mode == 90 else "INCREMENTAL"
         )
+
+
+class AdvancedSettingsPanel(tk.Frame):
+    """Shows and edits pass count, dithering mode, and controller type."""
+
+    _DITHERING_OPTIONS = ["none", "threshold", "floyd-steinberg", "jarvis"]
+    _CONTROLLER_OPTIONS = ["GRBL", "Marlin", "Ruida"]
+
+    def __init__(self, parent: tk.Widget,
+                 on_change: Optional[object] = None, **kwargs) -> None:
+        kwargs.setdefault("bg", _PANEL_BG)
+        kwargs.setdefault("padx", 8)
+        kwargs.setdefault("pady", 8)
+        super().__init__(parent, **kwargs)
+        self._on_change = on_change
+
+        tk.Label(self, text="ADVANCED SETTINGS", bg=_PANEL_BG, fg=_TITLE_FG,
+                 font=_MONO_SM).grid(row=0, column=0, columnspan=2,
+                                     sticky="w", pady=(0, 4))
+
+        # Pass count
+        tk.Label(self, text="PASSES:", bg=_PANEL_BG, fg=_LABEL_FG,
+                 font=_MONO_SM, anchor="w", width=12).grid(row=1, column=0, sticky="w")
+        self._pass_var = tk.IntVar(value=1)
+        ttk.Spinbox(self, from_=1, to=99, textvariable=self._pass_var,
+                    width=5, command=self._notify).grid(row=1, column=1, sticky="w")
+
+        # Dithering
+        tk.Label(self, text="DITHERING:", bg=_PANEL_BG, fg=_LABEL_FG,
+                 font=_MONO_SM, anchor="w", width=12).grid(row=2, column=0, sticky="w")
+        self._dither_var = tk.StringVar(value="none")
+        dither_cb = ttk.Combobox(self, textvariable=self._dither_var,
+                                  values=self._DITHERING_OPTIONS,
+                                  state="readonly", width=14)
+        dither_cb.grid(row=2, column=1, sticky="w")
+        dither_cb.bind("<<ComboboxSelected>>", lambda _: self._notify())
+
+        # Controller
+        tk.Label(self, text="CONTROLLER:", bg=_PANEL_BG, fg=_LABEL_FG,
+                 font=_MONO_SM, anchor="w", width=12).grid(row=3, column=0, sticky="w")
+        self._ctrl_var = tk.StringVar(value="GRBL")
+        ctrl_cb = ttk.Combobox(self, textvariable=self._ctrl_var,
+                                values=self._CONTROLLER_OPTIONS,
+                                state="readonly", width=14)
+        ctrl_cb.grid(row=3, column=1, sticky="w")
+        ctrl_cb.bind("<<ComboboxSelected>>", lambda _: self._notify())
+
+    def _notify(self) -> None:
+        if callable(self._on_change):
+            self._on_change()
+
+    @property
+    def pass_count(self) -> int:
+        return max(1, self._pass_var.get())
+
+    @property
+    def dithering_mode(self) -> str:
+        return self._dither_var.get()
+
+    @property
+    def controller_type(self) -> str:
+        return self._ctrl_var.get()
+
+    def update_from(self, machine: LaserMachine) -> None:
+        self._pass_var.set(machine.pass_count)
+        self._dither_var.set(machine.dithering_mode)
+        self._ctrl_var.set(machine.controller_type)
 
 
 class MessageLog(tk.Frame):

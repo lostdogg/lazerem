@@ -93,6 +93,11 @@ class LaserMachine:
         # Feed
         self.feed_rate: float = 1000.0   # mm/min
 
+        # Advanced settings
+        self.pass_count: int = 1                    # repeat program N times
+        self.dithering_mode: str = "none"           # none / threshold / floyd-steinberg / jarvis
+        self.controller_type: str = "GRBL"          # GRBL / Marlin / Ruida
+
         # Execution
         self.program_running: bool = False
         self.program_stopped: bool = False
@@ -115,6 +120,7 @@ class LaserMachine:
         """Execute a G-code program string.
 
         *on_block* is called before each block: ``on_block(index, block)``.
+        The program is repeated :attr:`pass_count` times.
         Returns a list of warning/info messages.
         """
         blocks, parse_errors = parse_program(source)
@@ -129,14 +135,21 @@ class LaserMachine:
         self.status = "RUNNING"
 
         try:
-            for idx, block in enumerate(blocks):
+            for pass_num in range(max(1, self.pass_count)):
                 if self.program_stopped:
                     break
-                if on_block:
-                    on_block(idx, block)
-                msg = self._execute_block(block)
-                if msg:
-                    messages.append(msg)
+                for idx, block in enumerate(blocks):
+                    if self.program_stopped:
+                        break
+                    if on_block:
+                        on_block(idx + pass_num * len(blocks), block)
+                    msg = self._execute_block(block)
+                    if msg:
+                        messages.append(msg)
+                # Reset position/laser between passes for multi-pass
+                if pass_num < self.pass_count - 1 and not self.program_stopped:
+                    self.position = Position()
+                    self.laser_on = False
         except MachineError as exc:
             messages.append(f"MACHINE ERROR: {exc}")
             self.status = "ALARM"
