@@ -75,7 +75,7 @@ python3 run_laser.py
 
 ### Requirements
 
-- Python 3.9 +
+- Python 3.9+
 - `tkinter` (included in most Python distributions; on Debian/Ubuntu:
   `sudo apt install python3-tk`)
 

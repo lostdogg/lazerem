@@ -466,7 +466,9 @@ def _collect_paths(
             pts: List[Tuple[float, float]] = []
             pts.append((x + r, y))
             pts.append((x + w - r, y))
-            pts.extend(_ellipse_points(x + w - r, y + r, r, r, 8)[len(_ellipse_points(x + w - r, y + r, r, r, 8)) // 4:len(_ellipse_points(x + w - r, y + r, r, r, 8)) // 2 + 1])
+            _tr_ellipse = _ellipse_points(x + w - r, y + r, r, r, 8)
+            n4 = len(_tr_ellipse) // 4
+            pts.extend(_tr_ellipse[n4 : len(_tr_ellipse) // 2 + 1])
             pts.append((x + w, y + h - r))
             pts.extend([(x + w - r + r * math.cos(a), y + h - r + r * math.sin(a))
                         for a in [math.pi * k / 8 for k in range(0, 5)]])
