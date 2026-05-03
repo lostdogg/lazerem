@@ -361,6 +361,59 @@ def _binary_to_gcode(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _greyscale_to_gcode(
+    gray: List[List[float]],
+    power_max: float,
+    speed: float,
+    pixel_size: float,
+) -> str:
+    """Generate raster G-code with laser power proportional to pixel darkness.
+
+    Light pixels (gray ≈ 1.0) → low power; dark pixels (gray ≈ 0.0) →
+    full *power_max*.  Each pixel becomes a short G1 move; pixels
+    brighter than 0.95 are skipped with a G0 (laser off).
+    """
+    h = len(gray)
+    w = len(gray[0]) if h else 0
+    lines = [
+        "G21 G90  ; metric, absolute",
+        "M5       ; ensure laser off",
+        "G0 X0.000 Y0.000",
+        "",
+    ]
+
+    for y in range(h):
+        row = gray[y]
+        gy = y * pixel_size
+        if y % 2 == 0:
+            indices = range(w)
+        else:
+            indices = range(w - 1, -1, -1)
+
+        laser_on = False
+        for x in indices:
+            gx = x * pixel_size
+            brightness = row[x] / 255.0  # normalise 0–255 → 0.0–1.0
+            if brightness >= 0.95:
+                if laser_on:
+                    lines.append("M5")
+                    laser_on = False
+                continue
+            pwr = int(round(power_max * (1.0 - brightness)))
+            pwr = max(1, min(int(power_max), pwr))
+            if not laser_on:
+                lines.append(f"G0 X{gx:.4f} Y{gy:.4f}")
+                lines.append(f"M3 S{pwr}")
+                laser_on = True
+            else:
+                lines.append(f"G1 X{gx:.4f} Y{gy:.4f} S{pwr} F{speed:.0f}")
+        if laser_on:
+            lines.append("M5")
+
+    lines.extend(["", "G0 X0.000 Y0.000", "M2"])
+    return "\n".join(lines)
+
+
 def trace_image(
     grid: PixelGrid,
     mode: str = "threshold",
@@ -376,7 +429,8 @@ def trace_image(
     grid:
         Pixel grid from :func:`load_png_tkinter` or :func:`load_bmp`.
     mode:
-        One of ``'threshold'``, ``'floyd-steinberg'``, or ``'jarvis'``.
+        One of ``'threshold'``, ``'floyd-steinberg'``, ``'jarvis'``,
+        or ``'greyscale'``.
     threshold:
         0.0–1.0 grayscale threshold (pixels below = engrave).
     power:
@@ -391,9 +445,12 @@ def trace_image(
     mode_lower = mode.lower()
     if mode_lower in ("floyd-steinberg", "floyd_steinberg"):
         bitmap = _dither_floyd_steinberg(gray, threshold)
+        return _binary_to_gcode(bitmap, power, speed, pixel_size)
     elif mode_lower == "jarvis":
         bitmap = _dither_jarvis(gray, threshold)
+        return _binary_to_gcode(bitmap, power, speed, pixel_size)
+    elif mode_lower in ("greyscale", "grayscale"):
+        return _greyscale_to_gcode(gray, power, speed, pixel_size)
     else:
         bitmap = _dither_threshold(gray, threshold)
-
-    return _binary_to_gcode(bitmap, power, speed, pixel_size)
+        return _binary_to_gcode(bitmap, power, speed, pixel_size)

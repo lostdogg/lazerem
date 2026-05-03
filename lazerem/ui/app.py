@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import glob
+import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from tkinter import ttk
-from typing import Optional
+from typing import Dict, Optional
 
 from ..machine import LaserMachine
 from ..design import DesignPath, array_path, nest_paths, offset_path, paths_to_gcode
+from ..drawing import DrawingDocument, drawing_to_gcode
 from ..parser import parse_program
 from ..job_queue import JobQueue, QueuedJob
 from ..cost_estimator import CostEstimator
@@ -22,6 +26,9 @@ from .design_panel import DesignPanel
 from .simulation_canvas import SimulationCanvas
 from .job_queue_panel import JobQueuePanel
 from .cost_panel import CostPanel
+from .import_dialog import ImportParamsDialog
+from .drawing_canvas import DrawingCanvas
+from .layers_panel import LayersPanel
 
 
 _DARK_BG = "#0d1a0d"
@@ -72,6 +79,14 @@ class App(tk.Tk):
         self._live_preview: bool = True
         self._preview_interval: int = 20  # redraw every N blocks
 
+        # COM port state (no actual serial in this build – UI only)
+        self._com_port: str = ""
+        self._com_connected: bool = False
+
+        # Drawing document (persists for the session)
+        self._draw_doc = DrawingDocument()
+        self._draw_doc.add_layer("Layer 1")      # default cut layer
+
         self._build_ui()
         self._load_sample()
 
@@ -118,23 +133,45 @@ class App(tk.Tk):
         self._editor.pack(fill="both", expand=True)
         ed_scroll.config(command=self._editor.yview)
 
-        # --- Centre: burn-path canvas ---
+        # --- Centre: tabbed canvas area ---
         centre = tk.Frame(pane, bg=_DARK_BG)
         pane.add(centre, minsize=300)
 
-        tk.Label(centre, text="BURN PATH (XY)", bg=_DARK_BG, fg="#4a9a4a",
+        centre_nb = ttk.Notebook(centre)
+        centre_nb.pack(fill="both", expand=True)
+
+        # Centre tab 1: Burn Path (existing visualisation)
+        burn_tab = tk.Frame(centre_nb, bg=_DARK_BG)
+        centre_nb.add(burn_tab, text="Burn Path")
+
+        tk.Label(burn_tab, text="BURN PATH (XY)", bg=_DARK_BG, fg="#4a9a4a",
                  font=_MONO_SM).pack(anchor="w", padx=4, pady=(2, 0))
 
-        self._canvas = BurnPathCanvas(centre)
+        self._canvas = BurnPathCanvas(burn_tab)
         self._canvas.pack(fill="both", expand=True, padx=4, pady=4)
 
-        legend = tk.Label(
-            centre,
+        tk.Label(
+            burn_tab,
             text="  ╌╌ Rapid (off)   ── Cut (power)   ── Arc"
                  "   Scroll: zoom   Drag: pan",
             bg=_DARK_BG, fg="#3a6a3a", font=("Monospace", 8),
-        )
-        legend.pack(anchor="w", padx=4)
+        ).pack(anchor="w", padx=4)
+
+        # Centre tab 2: Draw
+        draw_tab = tk.Frame(centre_nb, bg=_DARK_BG)
+        centre_nb.add(draw_tab, text="Draw")
+
+        # Drawing toolbar (inside Draw tab)
+        self._build_drawing_toolbar(draw_tab)
+
+        self._draw_canvas = DrawingCanvas(draw_tab, self._draw_doc)
+        self._draw_canvas.pack(fill="both", expand=True, padx=4, pady=4)
+
+        tk.Label(
+            draw_tab,
+            text="  Left-drag: draw   Middle/Ctrl+drag: pan   Scroll: zoom",
+            bg=_DARK_BG, fg="#3a6a3a", font=("Monospace", 8),
+        ).pack(anchor="w", padx=4)
 
         # --- Right: tabbed panel ---
         right = tk.Frame(pane, bg=_DARK_BG)
@@ -172,7 +209,36 @@ class App(tk.Tk):
         )
         right_nb.add(self._design_panel, text="Design")
 
-        # Tab 3: 3-D Simulation
+        # Tab 3: Layers  (for the Draw canvas)
+        layers_tab = tk.Frame(right_nb, bg=_DARK_BG)
+        right_nb.add(layers_tab, text="Layers")
+
+        self._layers_panel = LayersPanel(
+            layers_tab,
+            doc=self._draw_doc,
+            on_change=self._on_layers_changed,
+            on_active_change=self._on_active_layer_changed,
+        )
+        self._layers_panel.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # "Generate G-code" button (in Layers tab)
+        _btn_g = dict(bg="#1a4a1a", fg="#ccffcc",
+                      activebackground="#2a6a2a", activeforeground="#ffffff",
+                      relief="flat", padx=8, pady=3,
+                      font=_MONO_SM, cursor="hand2")
+        gen_row = tk.Frame(layers_tab, bg=_DARK_BG)
+        gen_row.pack(fill="x", padx=4, pady=(0, 4))
+        tk.Button(gen_row, text="⇒ Generate G-code from drawing",
+                  command=self._generate_gcode_from_drawing,
+                  **_btn_g).pack(fill="x")
+        tk.Button(gen_row, text="✕ Clear drawing",
+                  command=self._clear_drawing,
+                  bg="#4a1a1a", fg="#ffcccc",
+                  activebackground="#6a2a2a", activeforeground="#ffffff",
+                  relief="flat", padx=8, pady=3,
+                  font=_MONO_SM, cursor="hand2").pack(fill="x", pady=(2, 0))
+
+        # Tab 4: 3-D Simulation
         sim_tab = tk.Frame(right_nb, bg=_DARK_BG)
         right_nb.add(sim_tab, text="Simulate")
 
@@ -192,7 +258,7 @@ class App(tk.Tk):
         tk.Button(sim_btn_row, text="✗ Clear",
                   command=self._sim_canvas.clear, **_btn_s).pack(side="left", padx=2)
 
-        # Tab 4: Job Queue
+        # Tab 5: Job Queue
         self._queue_panel = JobQueuePanel(
             right_nb,
             queue=self._job_queue,
@@ -202,7 +268,7 @@ class App(tk.Tk):
         )
         right_nb.add(self._queue_panel, text="Queue")
 
-        # Tab 5: Cost Estimator
+        # Tab 6: Cost Estimator
         self._cost_panel = CostPanel(
             right_nb,
             get_burn_path=lambda: list(self._machine.burn_path),
@@ -358,6 +424,42 @@ class App(tk.Tk):
         tk.Button(parent, text="⇒ IMG", command=self._import_image,
                   **btn_opts).pack(side="left", padx=2)
 
+        tk.Frame(parent, bg="#0f2a0f", width=2).pack(side="left", padx=6, fill="y")
+
+        # --- COM port selector ---
+        tk.Label(parent, text="PORT:", bg="#0f2a0f", fg="#7abf7a",
+                 font=_MONO_SM).pack(side="left", padx=(2, 0))
+        self._port_var = tk.StringVar(value="")
+        self._port_cb = ttk.Combobox(
+            parent, textvariable=self._port_var,
+            values=self._list_serial_ports(),
+            state="readonly", width=10,
+            font=_MONO_SM,
+        )
+        self._port_cb.pack(side="left", padx=(2, 0))
+        if self._port_cb["values"]:
+            self._port_cb.current(0)
+        tk.Button(parent, text="⟳", command=self._com_refresh,
+                  bg="#0f2a0f", fg="#7abf7a",
+                  activebackground="#1a4a1a", activeforeground="#ffffff",
+                  relief="flat", padx=4, pady=2,
+                  font=_MONO_SM, cursor="hand2").pack(side="left", padx=1)
+        self._connect_btn = tk.Button(
+            parent, text="Connect",
+            command=self._com_connect,
+            bg="#1a4a1a", fg="#ccffcc",
+            activebackground="#2a6a2a", activeforeground="#ffffff",
+            relief="flat", padx=6, pady=2,
+            font=_MONO_SM, cursor="hand2",
+        )
+        self._connect_btn.pack(side="left", padx=(2, 4))
+        self._com_status_var = tk.StringVar(value="●")
+        self._com_status_lbl = tk.Label(
+            parent, textvariable=self._com_status_var,
+            bg="#0f2a0f", fg="#555555", font=_MONO_SM,
+        )
+        self._com_status_lbl.pack(side="left", padx=(0, 4))
+
         # Power / feed quick-set on right side
         tk.Frame(parent, bg="#0f2a0f").pack(side="left", fill="x", expand=True)
 
@@ -376,6 +478,57 @@ class App(tk.Tk):
                  width=6, bg="#071407", fg="#00ff88",
                  insertbackground="#00ff88",
                  font=_MONO_SM, relief="flat").pack(side="left", padx=(0, 4))
+
+    def _build_drawing_toolbar(self, parent: tk.Frame) -> None:
+        """Build the tool-select row inside the Draw tab."""
+        toolbar = tk.Frame(parent, bg="#0f2a0f", pady=3)
+        toolbar.pack(fill="x", padx=4, pady=(4, 0))
+
+        tk.Label(toolbar, text="TOOL:", bg="#0f2a0f", fg="#7abf7a",
+                 font=_MONO_SM).pack(side="left", padx=(4, 2))
+
+        tool_opts = dict(
+            bg="#0f2a0f", fg="#7abf7a",
+            activebackground="#1a4a1a", activeforeground="#ffffff",
+            relief="flat", padx=8, pady=2,
+            font=_MONO_SM, cursor="hand2",
+            bd=0,
+        )
+        # Track active tool button for visual feedback
+        self._draw_tool_buttons: dict = {}
+        self._draw_tool_var = tk.StringVar(value="select")
+
+        for key, label, tip in [
+            ("select", "↖ Select",   "Click to select"),
+            ("line",   "╱ Line",    "2-point line"),
+            ("rect",   "▭ Rect",    "2-point rectangle"),
+            ("circle", "○ Circle",  "2-point circle"),
+            ("text",   "T Text",    "Click to place text"),
+        ]:
+            btn = tk.Button(
+                toolbar, text=label,
+                command=lambda k=key: self._set_draw_tool(k),
+                **tool_opts,
+            )
+            btn.pack(side="left", padx=2)
+            self._draw_tool_buttons[key] = btn
+
+        tk.Frame(toolbar, bg="#0f2a0f", width=2).pack(
+            side="left", padx=6, fill="y")
+
+        tk.Button(toolbar, text="⊞ Fit",
+                  command=lambda: self._draw_canvas.fit_all(),
+                  **tool_opts).pack(side="left", padx=2)
+        tk.Button(toolbar, text="🗑 Del selected",
+                  command=self._delete_selected_draw_obj,
+                  bg="#4a1a1a", fg="#ffcccc",
+                  activebackground="#6a2a2a", activeforeground="#ffffff",
+                  relief="flat", padx=8, pady=2,
+                  font=_MONO_SM, cursor="hand2",
+                  ).pack(side="left", padx=2)
+
+        # Highlight default tool
+        self._set_draw_tool("select")
 
     def _build_mdi_bar(self) -> None:
         bar = tk.Frame(self, bg="#0f2a0f", pady=4)
@@ -454,7 +607,6 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
 
     def _import_svg(self) -> None:
-        from ..importers.svg_importer import import_svg
         path = filedialog.askopenfilename(
             title="Import SVG",
             filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
@@ -464,19 +616,39 @@ class App(tk.Tk):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 source = fh.read()
-            try:
-                power = float(self._power_var.get())
-            except ValueError:
-                power = 500.0
-            try:
-                speed = float(self._feed_var.get())
-            except ValueError:
-                speed = 3000.0
-            gcode = import_svg(source, power=power, speed=speed)
+        except OSError as exc:
+            messagebox.showerror("SVG Import Error", str(exc), parent=self)
+            return
+
+        try:
+            power = float(self._power_var.get())
+        except ValueError:
+            power = 500.0
+        try:
+            speed = float(self._feed_var.get())
+        except ValueError:
+            speed = 3000.0
+
+        fname = os.path.basename(path)
+        dlg = ImportParamsDialog(
+            self, import_type="svg", filename=fname,
+            default_power=power, default_speed=speed,
+        )
+        if dlg.result is None:
+            return
+        params = dlg.result
+        power = params["power"]
+        speed = params["speed"]
+
+        try:
+            gcode = self._apply_vector_toolpath(source, "svg", params, power, speed)
             self._editor.delete("1.0", "end")
             self._editor.insert("1.0", gcode)
             self._reset_machine()
-            self._log.log(f"Imported SVG: {path}")
+            self._log.log(
+                f"Imported SVG: {path}  "
+                f"[{params['toolpath_type']}]"
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("SVG Import Error", str(exc), parent=self)
 
@@ -491,19 +663,39 @@ class App(tk.Tk):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 source = fh.read()
-            try:
-                power = float(self._power_var.get())
-            except ValueError:
-                power = 500.0
-            try:
-                speed = float(self._feed_var.get())
-            except ValueError:
-                speed = 3000.0
-            gcode = import_dxf(source, power=power, speed=speed)
+        except OSError as exc:
+            messagebox.showerror("DXF Import Error", str(exc), parent=self)
+            return
+
+        try:
+            power = float(self._power_var.get())
+        except ValueError:
+            power = 500.0
+        try:
+            speed = float(self._feed_var.get())
+        except ValueError:
+            speed = 3000.0
+
+        fname = os.path.basename(path)
+        dlg = ImportParamsDialog(
+            self, import_type="dxf", filename=fname,
+            default_power=power, default_speed=speed,
+        )
+        if dlg.result is None:
+            return
+        params = dlg.result
+        power = params["power"]
+        speed = params["speed"]
+
+        try:
+            gcode = self._apply_vector_toolpath(source, "dxf", params, power, speed)
             self._editor.delete("1.0", "end")
             self._editor.insert("1.0", gcode)
             self._reset_machine()
-            self._log.log(f"Imported DXF: {path}")
+            self._log.log(
+                f"Imported DXF: {path}  "
+                f"[{params['toolpath_type']}]"
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("DXF Import Error", str(exc), parent=self)
 
@@ -521,35 +713,234 @@ class App(tk.Tk):
         if not path:
             return
         try:
-            ext = path.lower()
-            if ext.endswith(".bmp"):
-                grid, _w, _h = load_bmp(path)
+            if path.lower().endswith(".bmp"):
+                grid, img_w, img_h = load_bmp(path)
             else:
-                grid, _w, _h = load_png_tkinter(path)
+                grid, img_w, img_h = load_png_tkinter(path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Image Import Error", str(exc), parent=self)
+            return
 
-            try:
-                power = float(self._power_var.get())
-            except ValueError:
-                power = 500.0
-            try:
-                speed = float(self._feed_var.get())
-            except ValueError:
-                speed = 3000.0
+        try:
+            power = float(self._power_var.get())
+        except ValueError:
+            power = 500.0
+        try:
+            speed = float(self._feed_var.get())
+        except ValueError:
+            speed = 3000.0
 
-            gcode = trace_image(
-                grid,
-                mode="threshold",
-                threshold=0.5,
-                power=power,
-                speed=speed,
-                pixel_size=0.1,
-            )
+        fname = os.path.basename(path)
+        dlg = ImportParamsDialog(
+            self, import_type="image", filename=fname,
+            img_w=img_w, img_h=img_h,
+            default_power=power, default_speed=speed,
+        )
+        if dlg.result is None:
+            return
+        params = dlg.result
+        power = params["power"]
+        speed = params["speed"]
+
+        # Compute pixel_size from requested physical width
+        pixel_size = 0.1
+        if params["width_mm"] > 0 and img_w > 0:
+            pixel_size = params["width_mm"] / img_w
+
+        try:
+            tp = params["toolpath_type"]
+            if tp == "Image (Floyd-Steinberg Dither)":
+                gcode = trace_image(
+                    grid, mode="floyd-steinberg",
+                    threshold=params["fs_threshold"],
+                    power=power, speed=speed, pixel_size=pixel_size,
+                )
+            elif tp == "Image (Jarvis Dither)":
+                gcode = trace_image(
+                    grid, mode="jarvis",
+                    threshold=params["jarvis_threshold"],
+                    power=power, speed=speed, pixel_size=pixel_size,
+                )
+            elif tp == "Greyscale (Variable Power)":
+                gcode = trace_image(
+                    grid, mode="greyscale",
+                    power=power, speed=speed, pixel_size=pixel_size,
+                )
+            elif tp == "Hatch Fill":
+                from ..layer_effects import hatch_fill
+                w_mm = (params["width_mm"] if params["width_mm"] > 0
+                        else img_w * pixel_size)
+                h_mm = (params["height_mm"] if params["height_mm"] > 0
+                        else img_h * pixel_size)
+                gcode = hatch_fill(
+                    0, 0, w_mm, h_mm,
+                    angle=params["angle"],
+                    spacing=params["hatch_spacing"],
+                    power=power, speed=speed,
+                    crosshatch=params["crosshatch"],
+                )
+            else:
+                # Fill (Raster Engraving) – default threshold raster
+                gcode = trace_image(
+                    grid, mode="threshold",
+                    threshold=params["threshold"],
+                    power=power, speed=speed, pixel_size=pixel_size,
+                )
             self._editor.delete("1.0", "end")
             self._editor.insert("1.0", gcode)
             self._reset_machine()
-            self._log.log(f"Imported image: {path}  ({_w}×{_h} px)")
+            self._log.log(
+                f"Imported image: {path}  ({img_w}×{img_h} px)  "
+                f"[{tp}]"
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Image Import Error", str(exc), parent=self)
+
+    # ------------------------------------------------------------------
+    # Vector toolpath dispatcher (SVG / DXF)
+    # ------------------------------------------------------------------
+
+    def _apply_vector_toolpath(
+        self,
+        source: str,
+        fmt: str,
+        params: Dict,
+        power: float,
+        speed: float,
+    ) -> str:
+        """Parse *source* and apply the requested toolpath type.
+
+        Returns the resulting G-code string.
+        """
+        from ..layer_effects import gradient_fill, hatch_fill, perforation_to_dashes, spiral_fill
+        from ..design import offset_path, paths_to_gcode
+
+        tp = params["toolpath_type"]
+
+        # --- Parse to DesignPath objects ---
+        paths = self._parse_vector_source(source, fmt, params, power, speed)
+
+        # --- Compute bounding box of all paths ---
+        def _bbox_all(ps):
+            if not ps:
+                return 0.0, 0.0, 100.0, 100.0
+            all_pts = [pt for p in ps for pt in p.points]
+            if not all_pts:
+                return 0.0, 0.0, 100.0, 100.0
+            xs = [p[0] for p in all_pts]
+            ys = [p[1] for p in all_pts]
+            return min(xs), min(ys), max(xs), max(ys)
+
+        if tp == "Line (Cut)" or tp == "Knife/Drag":
+            gcode = paths_to_gcode(paths, power, speed)
+
+        elif tp == "Fill (Raster Engraving)":
+            x0, y0, x1, y1 = _bbox_all(paths)
+            gcode = gradient_fill(
+                x0, y0, x1, y1,
+                power_start=power, power_end=power,
+                line_spacing=params["line_spacing"],
+                speed=speed,
+            )
+
+        elif tp == "Offset Fill":
+            result = []
+            dist = params["offset_dist"]
+            count = max(1, params["offset_count"])
+            for p in paths:
+                result.append(p)
+                for i in range(1, count + 1):
+                    result.append(offset_path(p, dist * i))
+            gcode = paths_to_gcode(result, power, speed)
+
+        elif tp == "Hatch Fill":
+            x0, y0, x1, y1 = _bbox_all(paths)
+            gcode = hatch_fill(
+                x0, y0, x1, y1,
+                angle=params["angle"],
+                spacing=params["hatch_spacing"],
+                power=power, speed=speed,
+                crosshatch=params["crosshatch"],
+            )
+
+        elif tp == "Perforation (Dash/Score)":
+            raw = paths_to_gcode(paths, power, speed)
+            gcode = perforation_to_dashes(
+                raw,
+                dash_mm=params["dash_mm"],
+                gap_mm=params["gap_mm"],
+            )
+
+        elif tp == "Greyscale (Variable Power)":
+            # Treat as plain line cut (vector has no brightness data)
+            gcode = paths_to_gcode(paths, power, speed)
+
+        elif tp == "Spiral Toolpath":
+            x0, y0, x1, y1 = _bbox_all(paths)
+            cx = (x0 + x1) / 2.0
+            cy = (y0 + y1) / 2.0
+            gcode = spiral_fill(
+                cx, cy,
+                r_start=params["spiral_r_start"],
+                r_end=params["spiral_r_end"],
+                spacing=params["spiral_spacing"],
+                power=power, speed=speed,
+            )
+
+        elif tp == "Optimization":
+            optimized, result = self._optimizer.optimize(paths)
+            gcode = paths_to_gcode(optimized, power, speed)
+            self._log.log(
+                f"Optimized: rapid {result.original_rapid_mm:.1f}mm → "
+                f"{result.optimised_rapid_mm:.1f}mm "
+                f"({result.rapid_saving_pct:.0f}% saved)"
+            )
+
+        else:
+            gcode = paths_to_gcode(paths, power, speed)
+
+        return gcode
+
+    def _parse_vector_source(
+        self,
+        source: str,
+        fmt: str,
+        params: Dict,
+        power: float,
+        speed: float,
+    ):
+        """Parse SVG or DXF *source* into DesignPath objects with optional scaling."""
+        if fmt == "svg":
+            from ..importers.svg_importer import _collect_paths, _IDENTITY, _PX_TO_MM
+            import xml.etree.ElementTree as _ET
+            root = _ET.fromstring(source)
+            paths = _collect_paths(root, _IDENTITY, _PX_TO_MM, power, speed, 1)
+        else:
+            from ..importers.dxf_importer import _parse_entities, _collect_multivalue
+            from ..importers.dxf_importer import _entity_to_path
+            from ..design import DesignPath
+            entities = _parse_entities(source)
+            paths = []
+            for ent in entities:
+                p = _entity_to_path(ent, power, speed, 1)
+                if p is not None:
+                    paths.append(p)
+            paths.extend(_collect_multivalue(source, power, speed, 1))
+
+        # Optional uniform scale to target width
+        width_mm = params.get("width_mm", 0.0)
+        if width_mm > 0 and paths:
+            all_pts = [pt for p in paths for pt in p.points]
+            if all_pts:
+                xs = [pt[0] for pt in all_pts]
+                ys = [pt[1] for pt in all_pts]
+                cur_w = max(xs) - min(xs)
+                if cur_w > 1e-6:
+                    scale = width_mm / cur_w
+                    for p in paths:
+                        p.points = [(x * scale, y * scale)
+                                    for x, y in p.points]
+        return paths
 
     # ------------------------------------------------------------------
     # Design tool actions
@@ -1089,6 +1480,51 @@ class App(tk.Tk):
         self._adv_panel.update_from(self._machine)
 
     # ------------------------------------------------------------------
+    # Drawing tool actions
+    # ------------------------------------------------------------------
+
+    def _set_draw_tool(self, tool: str) -> None:
+        """Activate a drawing tool and update toolbar button highlights."""
+        self._draw_tool_var.set(tool)
+        self._draw_canvas.tool = tool
+        # Visual feedback: highlight active tool button
+        for key, btn in self._draw_tool_buttons.items():
+            if key == tool:
+                btn.config(bg="#1a4a1a", fg="#00ff88", relief="sunken")
+            else:
+                btn.config(bg="#0f2a0f", fg="#7abf7a", relief="flat")
+
+    def _delete_selected_draw_obj(self) -> None:
+        """Remove the currently selected drawing object."""
+        obj = self._draw_canvas.selected_object
+        if obj is not None:
+            self._draw_doc.remove_object(obj)
+            self._draw_canvas.clear_selection()
+        else:
+            self._log.log("No object selected in drawing canvas.")
+
+    def _on_layers_changed(self) -> None:
+        """Called by LayersPanel when layers are modified."""
+        self._draw_canvas.redraw()
+
+    def _on_active_layer_changed(self, idx: int) -> None:
+        """Called by LayersPanel when the active layer selection changes."""
+        self._draw_canvas.active_layer = idx
+
+    def _generate_gcode_from_drawing(self) -> None:
+        """Convert the current drawing to G-code and load it in the editor."""
+        gcode = drawing_to_gcode(self._draw_doc)
+        self._editor.delete("1.0", "end")
+        self._editor.insert("1.0", gcode)
+        self._log.log("G-code generated from drawing. Press F5 to run.")
+
+    def _clear_drawing(self) -> None:
+        """Remove all drawing objects (keeps layers)."""
+        self._draw_doc.objects.clear()
+        self._draw_canvas.clear_selection()
+        self._log.log("Drawing cleared.")
+
+    # ------------------------------------------------------------------
     # Help
     # ------------------------------------------------------------------
 
@@ -1125,3 +1561,73 @@ class App(tk.Tk):
             "  Scroll – Zoom  Drag – Pan",
             parent=self,
         )
+
+    # ------------------------------------------------------------------
+    # COM port helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _list_serial_ports() -> list:
+        """Return a list of available serial port names.
+
+        Attempts to use *pyserial* if installed; falls back to platform-
+        specific device globs.
+        """
+        try:
+            from serial.tools import list_ports as _lp
+            return [p.device for p in _lp.comports()] or ["(none found)"]
+        except ImportError:
+            pass
+        # Fallback: scan common port names / device files
+        if sys.platform.startswith("win"):
+            return [f"COM{i}" for i in range(1, 10)]
+        if sys.platform.startswith("darwin"):
+            ports = (
+                glob.glob("/dev/cu.usbserial*")
+                + glob.glob("/dev/cu.usbmodem*")
+                + glob.glob("/dev/tty.usbserial*")
+            )
+        else:
+            ports = (
+                glob.glob("/dev/ttyUSB*")
+                + glob.glob("/dev/ttyACM*")
+                + glob.glob("/dev/ttyS[0-9]*")
+            )
+        return sorted(ports) or ["(none found)"]
+
+    def _com_refresh(self) -> None:
+        """Refresh the COM port dropdown."""
+        ports = self._list_serial_ports()
+        self._port_cb["values"] = ports
+        if ports:
+            cur = self._port_var.get()
+            if cur not in ports:
+                self._port_cb.current(0)
+        self._log.log("COM port list refreshed.")
+
+    def _com_connect(self) -> None:
+        """Toggle connection state for the selected COM port."""
+        port = self._port_var.get()
+        if not port or port == "(none found)":
+            messagebox.showwarning(
+                "No Port", "Select a COM port first.", parent=self)
+            return
+        if self._com_connected:
+            # Disconnect
+            self._com_connected = False
+            self._com_port = ""
+            self._connect_btn.config(text="Connect")
+            self._com_status_var.set("●")
+            self._com_status_lbl.config(fg="#555555")
+            self._log.log(f"Disconnected from {port}.")
+        else:
+            # Connect (simulated – no real serial in this build)
+            self._com_connected = True
+            self._com_port = port
+            self._connect_btn.config(text="Disconnect")
+            self._com_status_var.set("●")
+            self._com_status_lbl.config(fg="#00ff88")
+            self._log.log(
+                f"Connected to {port}  "
+                f"(simulation mode – install pyserial for hardware)."
+            )
