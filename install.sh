@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # install.sh – set up Ray5W laser control on Linux (Ubuntu / Debian / Mint)
+#
+# For macOS, use:   brew install python-tk
+# For Windows, see: https://www.python.org/downloads/
+#                   (enable "tcl/tk and IDLE" under Optional Features)
 set -e
 
 PYTHON_MIN_MAJOR=3
-PYTHON_MIN_MINOR=8
+PYTHON_MIN_MINOR=9
 
 # ── Check Python version ──────────────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
@@ -32,3 +36,6 @@ echo "✓ Installation complete."
 echo ""
 echo "Run the laser control with:"
 echo "  python3 run_laser.py"
+echo ""
+echo "Or use the smart launcher (also works from a USB drive):"
+echo "  ./lazerem.sh"
