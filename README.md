@@ -104,6 +104,157 @@ third-party dependencies**.
 
 ---
 
+## Installation
+
+Lazerem has **zero third-party dependencies** — only Python 3.9+ and
+`tkinter` are needed.
+
+### Linux (Ubuntu / Debian / Mint)
+
+```bash
+# 1 – install Python 3 and tkinter (tkinter is often pre-installed)
+sudo apt update
+sudo apt install python3 python3-tk
+
+# 2 – clone or download the repository
+git clone https://github.com/lostdogg/lazerem.git
+cd lazerem
+
+# 3 – run the automated installer (checks Python version, installs tkinter)
+bash install.sh
+
+# 4 – launch
+python3 run_laser.py
+```
+
+### Linux (Fedora / RHEL / CentOS)
+
+```bash
+sudo dnf install python3 python3-tkinter
+git clone https://github.com/lostdogg/lazerem.git
+cd lazerem
+python3 run_laser.py
+```
+
+### Linux (Arch)
+
+```bash
+sudo pacman -S python tk
+git clone https://github.com/lostdogg/lazerem.git
+cd lazerem
+python3 run_laser.py
+```
+
+### macOS
+
+**Option A – Homebrew (recommended)**
+
+```bash
+# Install Homebrew if you don't have it: https://brew.sh
+brew install python-tk      # installs Python 3 + tkinter together
+git clone https://github.com/lostdogg/lazerem.git
+cd lazerem
+python3 run_laser.py
+```
+
+**Option B – python.org installer**
+
+1. Download the macOS **pkg** from <https://www.python.org/downloads/>.
+2. Run the installer — tkinter is included automatically.
+3. Open a terminal and run:
+
+```bash
+git clone https://github.com/lostdogg/lazerem.git
+cd lazerem
+python3 run_laser.py
+```
+
+### Windows
+
+1. Download **Python 3.12** (or newer) from <https://www.python.org/downloads/>.
+2. Run the installer and on the **first screen**:
+   - ✅ Check **"Add Python to PATH"**
+3. Click **"Customize installation"** → **"Optional Features"** and ensure:
+   - ✅ **tcl/tk and IDLE** is checked ← this installs `tkinter`
+4. Complete the installation.
+5. Open **Command Prompt** in the Lazerem folder and run:
+
+```cmd
+python run_laser.py
+```
+
+Or double-click **`lazerem.bat`** (included in the repository).
+
+---
+
+## Portable / USB Version
+
+You can run Lazerem from a USB drive without a traditional installation.
+The `make_portable.py` script bundles everything into a single folder that
+you can copy to any USB drive.
+
+### Creating the bundle
+
+```bash
+# On the machine where you have Python + tkinter already installed:
+python3 make_portable.py
+# Output: dist/lazerem-portable/
+```
+
+You can choose a custom output directory:
+
+```bash
+python3 make_portable.py --dest /media/usb/lazerem-portable
+```
+
+### What the bundle contains
+
+```
+lazerem-portable/
+  run_laser.py        – application entry point
+  lazerem/            – full package source (no compiled binaries)
+  lazerem.sh          – Linux / macOS launcher (auto-detects Python)
+  lazerem.bat         – Windows launcher (auto-detects Python)
+  install_check.py    – quick self-test before first run
+  README.txt          – offline quick-start guide
+```
+
+### Running from the USB drive
+
+**Windows**  
+Double-click `lazerem.bat`, or open Command Prompt and run:
+```cmd
+python run_laser.py
+```
+
+**Linux / macOS**  
+Open a terminal in the bundle folder and run:
+```bash
+chmod +x lazerem.sh   # only needed once
+./lazerem.sh
+```
+
+> **Note:** Python 3 + tkinter must be installed on the **host machine**
+> (the computer the USB is plugged into). Lazerem contains only Python source
+> code, not a bundled Python interpreter. Use `install_check.py` to verify
+> the host before first launch:
+>
+> ```bash
+> python3 install_check.py   # Linux / macOS
+> python  install_check.py   # Windows
+> ```
+
+### USB tips
+
+| Topic | Detail |
+|-------|--------|
+| **Settings & materials** | Saved to `~/.lazerem/` on the host machine — not on the USB — so the drive can remain read-only. |
+| **No internet needed** | Once Python + tkinter are installed, no further downloads are required. |
+| **Shared computers** | Each user's settings are stored in their own home directory automatically. |
+| **Re-generating the bundle** | Run `python3 make_portable.py` again at any time after updating the source. |
+
+---
+
 ## Running
 
 ```bash
