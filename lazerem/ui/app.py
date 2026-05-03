@@ -166,6 +166,8 @@ class App(tk.Tk):
 
         self._draw_canvas = DrawingCanvas(draw_tab, self._draw_doc)
         self._draw_canvas.pack(fill="both", expand=True, padx=4, pady=4)
+        # Now that the canvas exists, sync its tool with the toolbar default
+        self._set_draw_tool("select")
 
         tk.Label(
             draw_tab,
@@ -527,8 +529,8 @@ class App(tk.Tk):
                   font=_MONO_SM, cursor="hand2",
                   ).pack(side="left", padx=2)
 
-        # Highlight default tool
-        self._set_draw_tool("select")
+        # Highlight default tool button (canvas not yet created; only update UI)
+        self._highlight_draw_tool(self._draw_tool_var.get())
 
     def _build_mdi_bar(self) -> None:
         bar = tk.Frame(self, bg="#0f2a0f", pady=4)
@@ -1483,16 +1485,19 @@ class App(tk.Tk):
     # Drawing tool actions
     # ------------------------------------------------------------------
 
-    def _set_draw_tool(self, tool: str) -> None:
-        """Activate a drawing tool and update toolbar button highlights."""
-        self._draw_tool_var.set(tool)
-        self._draw_canvas.tool = tool
-        # Visual feedback: highlight active tool button
+    def _highlight_draw_tool(self, tool: str) -> None:
+        """Update toolbar button highlights to reflect the active tool."""
         for key, btn in self._draw_tool_buttons.items():
             if key == tool:
                 btn.config(bg="#1a4a1a", fg="#00ff88", relief="sunken")
             else:
                 btn.config(bg="#0f2a0f", fg="#7abf7a", relief="flat")
+
+    def _set_draw_tool(self, tool: str) -> None:
+        """Activate a drawing tool and update toolbar button highlights."""
+        self._draw_tool_var.set(tool)
+        self._draw_canvas.tool = tool
+        self._highlight_draw_tool(tool)
 
     def _delete_selected_draw_obj(self) -> None:
         """Remove the currently selected drawing object."""
