@@ -1496,11 +1496,10 @@ class App(tk.Tk):
 
     def _delete_selected_draw_obj(self) -> None:
         """Remove the currently selected drawing object."""
-        obj = self._draw_canvas._selected
+        obj = self._draw_canvas.selected_object
         if obj is not None:
             self._draw_doc.remove_object(obj)
-            self._draw_canvas._selected = None
-            self._draw_canvas.redraw()
+            self._draw_canvas.clear_selection()
         else:
             self._log.log("No object selected in drawing canvas.")
 
@@ -1522,8 +1521,7 @@ class App(tk.Tk):
     def _clear_drawing(self) -> None:
         """Remove all drawing objects (keeps layers)."""
         self._draw_doc.objects.clear()
-        self._draw_canvas._selected = None
-        self._draw_canvas.redraw()
+        self._draw_canvas.clear_selection()
         self._log.log("Drawing cleared.")
 
     # ------------------------------------------------------------------

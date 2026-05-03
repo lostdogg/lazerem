@@ -140,6 +140,16 @@ class DrawingCanvas(tk.Canvas):
         self._selected = None
         self.redraw()
 
+    def clear_selection(self) -> None:
+        """Deselect the currently selected drawing object."""
+        self._selected = None
+        self.redraw()
+
+    @property
+    def selected_object(self):
+        """Return the currently selected drawing object (or None)."""
+        return self._selected
+
     def fit_all(self) -> None:
         """Zoom and pan so all objects are visible."""
         xs: List[float] = [0.0]

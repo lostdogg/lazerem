@@ -427,7 +427,7 @@ def text_to_paths(
         for stroke in strokes:
             pts = [(cx + sx * height, y + sy * height) for sx, sy in stroke]
             if len(pts) >= 2:
-                paths.append(DesignPath(pts, False, power, speed, 1))
+                paths.append(DesignPath(pts, False, power, speed, passes=1))
         cx += height * _glyph_advance(ch)
     return paths
 
