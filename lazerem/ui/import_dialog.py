@@ -112,7 +112,7 @@ class ImportParamsDialog(tk.Toplevel):
         self._import_type = import_type.lower()
         self._img_w = img_w
         self._img_h = img_h
-        self._aspect: float = img_w / img_h if img_h else 1.0
+        self._aspect: float = img_w / img_h if (img_w and img_h) else 1.0
 
         label = filename or import_type.upper()
         self.title(f"Import Parameters – {label}")

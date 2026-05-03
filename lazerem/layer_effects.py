@@ -300,8 +300,8 @@ def _line_bbox_clip(
 
     Returns ``(sx, sy, ex, ey)`` or ``None`` if the line misses the box.
     """
-    t_min = -1e18
-    t_max = 1e18
+    t_min = float("-inf")
+    t_max = float("inf")
     for p, d, b0, b1 in ((px, dx, x0, x1), (py, dy, y0, y1)):
         if abs(d) < 1e-12:
             if p < b0 - 1e-9 or p > b1 + 1e-9:

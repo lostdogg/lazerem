@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import os
 import sys
 import threading
 import tkinter as tk
@@ -497,10 +498,6 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
 
     def _import_svg(self) -> None:
-        from ..importers.svg_importer import import_svg, _collect_paths, _IDENTITY, _PX_TO_MM
-        from ..design import paths_to_gcode
-        import xml.etree.ElementTree as _ET
-
         path = filedialog.askopenfilename(
             title="Import SVG",
             filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
@@ -523,8 +520,7 @@ class App(tk.Tk):
         except ValueError:
             speed = 3000.0
 
-        import os as _os
-        fname = _os.path.basename(path)
+        fname = os.path.basename(path)
         dlg = ImportParamsDialog(
             self, import_type="svg", filename=fname,
             default_power=power, default_speed=speed,
@@ -571,8 +567,7 @@ class App(tk.Tk):
         except ValueError:
             speed = 3000.0
 
-        import os as _os
-        fname = _os.path.basename(path)
+        fname = os.path.basename(path)
         dlg = ImportParamsDialog(
             self, import_type="dxf", filename=fname,
             default_power=power, default_speed=speed,
@@ -626,8 +621,7 @@ class App(tk.Tk):
         except ValueError:
             speed = 3000.0
 
-        import os as _os
-        fname = _os.path.basename(path)
+        fname = os.path.basename(path)
         dlg = ImportParamsDialog(
             self, import_type="image", filename=fname,
             img_w=img_w, img_h=img_h,
