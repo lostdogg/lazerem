@@ -13,6 +13,7 @@ from typing import Dict, Optional
 
 from ..machine import LaserMachine
 from ..design import DesignPath, array_path, nest_paths, offset_path, paths_to_gcode
+from ..drawing import DrawingDocument, drawing_to_gcode
 from ..parser import parse_program
 from ..job_queue import JobQueue, QueuedJob
 from ..cost_estimator import CostEstimator
@@ -26,6 +27,8 @@ from .simulation_canvas import SimulationCanvas
 from .job_queue_panel import JobQueuePanel
 from .cost_panel import CostPanel
 from .import_dialog import ImportParamsDialog
+from .drawing_canvas import DrawingCanvas
+from .layers_panel import LayersPanel
 
 
 _DARK_BG = "#0d1a0d"
@@ -80,6 +83,10 @@ class App(tk.Tk):
         self._com_port: str = ""
         self._com_connected: bool = False
 
+        # Drawing document (persists for the session)
+        self._draw_doc = DrawingDocument()
+        self._draw_doc.add_layer("Layer 1")      # default cut layer
+
         self._build_ui()
         self._load_sample()
 
@@ -126,23 +133,45 @@ class App(tk.Tk):
         self._editor.pack(fill="both", expand=True)
         ed_scroll.config(command=self._editor.yview)
 
-        # --- Centre: burn-path canvas ---
+        # --- Centre: tabbed canvas area ---
         centre = tk.Frame(pane, bg=_DARK_BG)
         pane.add(centre, minsize=300)
 
-        tk.Label(centre, text="BURN PATH (XY)", bg=_DARK_BG, fg="#4a9a4a",
+        centre_nb = ttk.Notebook(centre)
+        centre_nb.pack(fill="both", expand=True)
+
+        # Centre tab 1: Burn Path (existing visualisation)
+        burn_tab = tk.Frame(centre_nb, bg=_DARK_BG)
+        centre_nb.add(burn_tab, text="Burn Path")
+
+        tk.Label(burn_tab, text="BURN PATH (XY)", bg=_DARK_BG, fg="#4a9a4a",
                  font=_MONO_SM).pack(anchor="w", padx=4, pady=(2, 0))
 
-        self._canvas = BurnPathCanvas(centre)
+        self._canvas = BurnPathCanvas(burn_tab)
         self._canvas.pack(fill="both", expand=True, padx=4, pady=4)
 
-        legend = tk.Label(
-            centre,
+        tk.Label(
+            burn_tab,
             text="  ╌╌ Rapid (off)   ── Cut (power)   ── Arc"
                  "   Scroll: zoom   Drag: pan",
             bg=_DARK_BG, fg="#3a6a3a", font=("Monospace", 8),
-        )
-        legend.pack(anchor="w", padx=4)
+        ).pack(anchor="w", padx=4)
+
+        # Centre tab 2: Draw
+        draw_tab = tk.Frame(centre_nb, bg=_DARK_BG)
+        centre_nb.add(draw_tab, text="Draw")
+
+        # Drawing toolbar (inside Draw tab)
+        self._build_drawing_toolbar(draw_tab)
+
+        self._draw_canvas = DrawingCanvas(draw_tab, self._draw_doc)
+        self._draw_canvas.pack(fill="both", expand=True, padx=4, pady=4)
+
+        tk.Label(
+            draw_tab,
+            text="  Left-drag: draw   Middle/Ctrl+drag: pan   Scroll: zoom",
+            bg=_DARK_BG, fg="#3a6a3a", font=("Monospace", 8),
+        ).pack(anchor="w", padx=4)
 
         # --- Right: tabbed panel ---
         right = tk.Frame(pane, bg=_DARK_BG)
@@ -180,7 +209,36 @@ class App(tk.Tk):
         )
         right_nb.add(self._design_panel, text="Design")
 
-        # Tab 3: 3-D Simulation
+        # Tab 3: Layers  (for the Draw canvas)
+        layers_tab = tk.Frame(right_nb, bg=_DARK_BG)
+        right_nb.add(layers_tab, text="Layers")
+
+        self._layers_panel = LayersPanel(
+            layers_tab,
+            doc=self._draw_doc,
+            on_change=self._on_layers_changed,
+            on_active_change=self._on_active_layer_changed,
+        )
+        self._layers_panel.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # "Generate G-code" button (in Layers tab)
+        _btn_g = dict(bg="#1a4a1a", fg="#ccffcc",
+                      activebackground="#2a6a2a", activeforeground="#ffffff",
+                      relief="flat", padx=8, pady=3,
+                      font=_MONO_SM, cursor="hand2")
+        gen_row = tk.Frame(layers_tab, bg=_DARK_BG)
+        gen_row.pack(fill="x", padx=4, pady=(0, 4))
+        tk.Button(gen_row, text="⇒ Generate G-code from drawing",
+                  command=self._generate_gcode_from_drawing,
+                  **_btn_g).pack(fill="x")
+        tk.Button(gen_row, text="✕ Clear drawing",
+                  command=self._clear_drawing,
+                  bg="#4a1a1a", fg="#ffcccc",
+                  activebackground="#6a2a2a", activeforeground="#ffffff",
+                  relief="flat", padx=8, pady=3,
+                  font=_MONO_SM, cursor="hand2").pack(fill="x", pady=(2, 0))
+
+        # Tab 4: 3-D Simulation
         sim_tab = tk.Frame(right_nb, bg=_DARK_BG)
         right_nb.add(sim_tab, text="Simulate")
 
@@ -200,7 +258,7 @@ class App(tk.Tk):
         tk.Button(sim_btn_row, text="✗ Clear",
                   command=self._sim_canvas.clear, **_btn_s).pack(side="left", padx=2)
 
-        # Tab 4: Job Queue
+        # Tab 5: Job Queue
         self._queue_panel = JobQueuePanel(
             right_nb,
             queue=self._job_queue,
@@ -210,7 +268,7 @@ class App(tk.Tk):
         )
         right_nb.add(self._queue_panel, text="Queue")
 
-        # Tab 5: Cost Estimator
+        # Tab 6: Cost Estimator
         self._cost_panel = CostPanel(
             right_nb,
             get_burn_path=lambda: list(self._machine.burn_path),
@@ -420,6 +478,57 @@ class App(tk.Tk):
                  width=6, bg="#071407", fg="#00ff88",
                  insertbackground="#00ff88",
                  font=_MONO_SM, relief="flat").pack(side="left", padx=(0, 4))
+
+    def _build_drawing_toolbar(self, parent: tk.Frame) -> None:
+        """Build the tool-select row inside the Draw tab."""
+        toolbar = tk.Frame(parent, bg="#0f2a0f", pady=3)
+        toolbar.pack(fill="x", padx=4, pady=(4, 0))
+
+        tk.Label(toolbar, text="TOOL:", bg="#0f2a0f", fg="#7abf7a",
+                 font=_MONO_SM).pack(side="left", padx=(4, 2))
+
+        tool_opts = dict(
+            bg="#0f2a0f", fg="#7abf7a",
+            activebackground="#1a4a1a", activeforeground="#ffffff",
+            relief="flat", padx=8, pady=2,
+            font=_MONO_SM, cursor="hand2",
+            bd=0,
+        )
+        # Track active tool button for visual feedback
+        self._draw_tool_buttons: dict = {}
+        self._draw_tool_var = tk.StringVar(value="select")
+
+        for key, label, tip in [
+            ("select", "↖ Select",   "Click to select"),
+            ("line",   "╱ Line",    "2-point line"),
+            ("rect",   "▭ Rect",    "2-point rectangle"),
+            ("circle", "○ Circle",  "2-point circle"),
+            ("text",   "T Text",    "Click to place text"),
+        ]:
+            btn = tk.Button(
+                toolbar, text=label,
+                command=lambda k=key: self._set_draw_tool(k),
+                **tool_opts,
+            )
+            btn.pack(side="left", padx=2)
+            self._draw_tool_buttons[key] = btn
+
+        tk.Frame(toolbar, bg="#0f2a0f", width=2).pack(
+            side="left", padx=6, fill="y")
+
+        tk.Button(toolbar, text="⊞ Fit",
+                  command=lambda: self._draw_canvas.fit_all(),
+                  **tool_opts).pack(side="left", padx=2)
+        tk.Button(toolbar, text="🗑 Del selected",
+                  command=self._delete_selected_draw_obj,
+                  bg="#4a1a1a", fg="#ffcccc",
+                  activebackground="#6a2a2a", activeforeground="#ffffff",
+                  relief="flat", padx=8, pady=2,
+                  font=_MONO_SM, cursor="hand2",
+                  ).pack(side="left", padx=2)
+
+        # Highlight default tool
+        self._set_draw_tool("select")
 
     def _build_mdi_bar(self) -> None:
         bar = tk.Frame(self, bg="#0f2a0f", pady=4)
@@ -1369,6 +1478,53 @@ class App(tk.Tk):
         self._coord_panel.update_from(self._machine)
         self._status_panel.update_from(self._machine)
         self._adv_panel.update_from(self._machine)
+
+    # ------------------------------------------------------------------
+    # Drawing tool actions
+    # ------------------------------------------------------------------
+
+    def _set_draw_tool(self, tool: str) -> None:
+        """Activate a drawing tool and update toolbar button highlights."""
+        self._draw_tool_var.set(tool)
+        self._draw_canvas.tool = tool
+        # Visual feedback: highlight active tool button
+        for key, btn in self._draw_tool_buttons.items():
+            if key == tool:
+                btn.config(bg="#1a4a1a", fg="#00ff88", relief="sunken")
+            else:
+                btn.config(bg="#0f2a0f", fg="#7abf7a", relief="flat")
+
+    def _delete_selected_draw_obj(self) -> None:
+        """Remove the currently selected drawing object."""
+        obj = self._draw_canvas._selected
+        if obj is not None:
+            self._draw_doc.remove_object(obj)
+            self._draw_canvas._selected = None
+            self._draw_canvas.redraw()
+        else:
+            self._log.log("No object selected in drawing canvas.")
+
+    def _on_layers_changed(self) -> None:
+        """Called by LayersPanel when layers are modified."""
+        self._draw_canvas.redraw()
+
+    def _on_active_layer_changed(self, idx: int) -> None:
+        """Called by LayersPanel when the active layer selection changes."""
+        self._draw_canvas.active_layer = idx
+
+    def _generate_gcode_from_drawing(self) -> None:
+        """Convert the current drawing to G-code and load it in the editor."""
+        gcode = drawing_to_gcode(self._draw_doc)
+        self._editor.delete("1.0", "end")
+        self._editor.insert("1.0", gcode)
+        self._log.log("G-code generated from drawing. Press F5 to run.")
+
+    def _clear_drawing(self) -> None:
+        """Remove all drawing objects (keeps layers)."""
+        self._draw_doc.objects.clear()
+        self._draw_canvas._selected = None
+        self._draw_canvas.redraw()
+        self._log.log("Drawing cleared.")
 
     # ------------------------------------------------------------------
     # Help
