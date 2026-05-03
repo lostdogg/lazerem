@@ -315,7 +315,7 @@ class LaserMachine:
         dx = x2 - x1
         dy = y2 - y1
         dist = math.hypot(dx, dy)
-        if dist == 0 or dist > 2 * abs(r):
+        if dist < 1e-9 or dist > 2 * abs(r):
             raise MachineError("Arc radius too small for start/end distance")
         mx = (x1 + x2) / 2
         my = (y1 + y2) / 2

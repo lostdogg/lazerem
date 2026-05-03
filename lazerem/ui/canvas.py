@@ -146,6 +146,8 @@ class BurnPathCanvas(tk.Canvas):
         w = self.winfo_width() or 600
         h = self.winfo_height() or 400
 
+        if self._scale <= 0:
+            return
         raw_spacing = 10.0 / self._scale
         magnitude = 10 ** math.floor(math.log10(max(raw_spacing, 0.001)))
         grid_mm = magnitude * 10
