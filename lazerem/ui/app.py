@@ -29,6 +29,7 @@ from .cost_panel import CostPanel
 from .import_dialog import ImportParamsDialog
 from .drawing_canvas import DrawingCanvas
 from .layers_panel import LayersPanel
+from ..gcode_utils import apply_gcode_translate as _apply_gcode_translate
 
 
 _DARK_BG = "#0d1a0d"
@@ -346,6 +347,9 @@ class App(tk.Tk):
         design_menu.add_separator()
         design_menu.add_command(label="Boolean Union",
                                 command=self._boolean_union_noop)
+        design_menu.add_separator()
+        design_menu.add_command(label="Translate G-code…",
+                                command=self._translate_gcode)
         menubar.add_cascade(label="Design", menu=design_menu)
 
         # ---- Tools ----
@@ -521,6 +525,30 @@ class App(tk.Tk):
         tk.Button(toolbar, text="⊞ Fit",
                   command=lambda: self._draw_canvas.fit_all(),
                   **tool_opts).pack(side="left", padx=2)
+
+        # Snap toggle button
+        self._snap_var = tk.BooleanVar(value=True)
+        self._snap_btn = tk.Button(
+            toolbar, text="⊕ Snap: ON",
+            command=self._toggle_snap,
+            **tool_opts,
+        )
+        self._snap_btn.pack(side="left", padx=2)
+
+        tk.Frame(toolbar, bg="#0f2a0f", width=2).pack(
+            side="left", padx=6, fill="y")
+
+        # Undo and translate buttons
+        tk.Button(toolbar, text="↩ Undo",
+                  command=lambda: self._draw_canvas._undo(),
+                  **tool_opts).pack(side="left", padx=2)
+        tk.Button(toolbar, text="↔ Translate…",
+                  command=self._translate_draw_objects,
+                  **tool_opts).pack(side="left", padx=2)
+
+        tk.Frame(toolbar, bg="#0f2a0f", width=2).pack(
+            side="left", padx=6, fill="y")
+
         tk.Button(toolbar, text="🗑 Del selected",
                   command=self._delete_selected_draw_obj,
                   bg="#4a1a1a", fg="#ffcccc",
@@ -531,6 +559,56 @@ class App(tk.Tk):
 
         # Highlight default tool button (canvas not yet created; only update UI)
         self._highlight_draw_tool(self._draw_tool_var.get())
+
+    def _toggle_snap(self) -> None:
+        """Toggle snap-to-point on/off."""
+        new_state = not self._snap_var.get()
+        self._snap_var.set(new_state)
+        if hasattr(self, "_draw_canvas"):
+            self._draw_canvas.snap_enabled = new_state
+        label = "⊕ Snap: ON" if new_state else "○ Snap: OFF"
+        self._snap_btn.config(text=label)
+
+    def _translate_draw_objects(self) -> None:
+        """Open a dialog to translate all drawing objects by dx, dy."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Translate Drawing")
+        dlg.configure(bg="#0d1a0d")
+        dlg.resizable(False, False)
+
+        _lbl = dict(bg="#0d1a0d", fg="#7abf7a", font=_MONO_SM)
+        _ent = dict(bg="#071407", fg="#00ff88", insertbackground="#00ff88",
+                    font=_MONO_SM, width=8, relief="flat")
+
+        tk.Label(dlg, text="Translate all objects (mm)", **_lbl).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
+        tk.Label(dlg, text="X offset:", **_lbl).grid(
+            row=1, column=0, sticky="w", padx=8, pady=2)
+        dx_var = tk.StringVar(value="0")
+        tk.Entry(dlg, textvariable=dx_var, **_ent).grid(
+            row=1, column=1, padx=8)
+        tk.Label(dlg, text="Y offset:", **_lbl).grid(
+            row=2, column=0, sticky="w", padx=8, pady=2)
+        dy_var = tk.StringVar(value="0")
+        tk.Entry(dlg, textvariable=dy_var, **_ent).grid(
+            row=2, column=1, padx=8)
+
+        def _ok():
+            try:
+                dx = float(dx_var.get())
+                dy = float(dy_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Invalid offset values.", parent=dlg)
+                return
+            dlg.destroy()
+            self._draw_doc.translate_all(dx, dy)
+            self._draw_canvas.redraw()
+            self._log.log(f"Translated drawing by dx={dx:.3f}  dy={dy:.3f} mm")
+
+        tk.Button(dlg, text="OK", command=_ok,
+                  bg="#1a4a1a", fg="#ccffcc", font=_MONO_SM).grid(
+            row=3, column=0, columnspan=2, pady=8)
+        dlg.bind("<Return>", lambda _: _ok())
 
     def _build_mdi_bar(self) -> None:
         bar = tk.Frame(self, bg="#0f2a0f", pady=4)
@@ -631,10 +709,22 @@ class App(tk.Tk):
         except ValueError:
             speed = 3000.0
 
+        # Pre-parse paths for dialog preview
+        preview_paths = None
+        try:
+            from ..importers.svg_importer import _collect_paths, _IDENTITY, _PX_TO_MM
+            import xml.etree.ElementTree as _ET
+            root = _ET.fromstring(source)
+            prev_objs = _collect_paths(root, _IDENTITY, _PX_TO_MM, power, speed, 1)
+            preview_paths = [list(p.points) for p in prev_objs]
+        except Exception:
+            pass
+
         fname = os.path.basename(path)
         dlg = ImportParamsDialog(
             self, import_type="svg", filename=fname,
             default_power=power, default_speed=speed,
+            preview_paths=preview_paths,
         )
         if dlg.result is None:
             return
@@ -678,10 +768,28 @@ class App(tk.Tk):
         except ValueError:
             speed = 3000.0
 
+        # Pre-parse paths for dialog preview
+        preview_paths = None
+        try:
+            from ..importers.dxf_importer import (
+                _parse_entities, _collect_multivalue, _entity_to_path,
+            )
+            entities = _parse_entities(source)
+            prev_objs = []
+            for ent in entities:
+                p = _entity_to_path(ent, power, speed, 1)
+                if p is not None:
+                    prev_objs.append(p)
+            prev_objs.extend(_collect_multivalue(source, power, speed, 1))
+            preview_paths = [list(p.points) for p in prev_objs]
+        except Exception:
+            pass
+
         fname = os.path.basename(path)
         dlg = ImportParamsDialog(
             self, import_type="dxf", filename=fname,
             default_power=power, default_speed=speed,
+            preview_paths=preview_paths,
         )
         if dlg.result is None:
             return
@@ -737,6 +845,7 @@ class App(tk.Tk):
             self, import_type="image", filename=fname,
             img_w=img_w, img_h=img_h,
             default_power=power, default_speed=speed,
+            preview_grid=grid,
         )
         if dlg.result is None:
             return
@@ -748,6 +857,9 @@ class App(tk.Tk):
         pixel_size = 0.1
         if params["width_mm"] > 0 and img_w > 0:
             pixel_size = params["width_mm"] / img_w
+
+        origin_x = params.get("origin_x", 0.0)
+        origin_y = params.get("origin_y", 0.0)
 
         try:
             tp = params["toolpath_type"]
@@ -791,9 +903,15 @@ class App(tk.Tk):
             self._editor.delete("1.0", "end")
             self._editor.insert("1.0", gcode)
             self._reset_machine()
+            origin_info = ""
+            if origin_x or origin_y:
+                gcode = _apply_gcode_translate(gcode, origin_x, origin_y)
+                self._editor.delete("1.0", "end")
+                self._editor.insert("1.0", gcode)
+                origin_info = f"  offset=({origin_x:.2f},{origin_y:.2f})"
             self._log.log(
                 f"Imported image: {path}  ({img_w}×{img_h} px)  "
-                f"[{tp}]"
+                f"[{tp}]{origin_info}"
             )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Image Import Error", str(exc), parent=self)
@@ -942,6 +1060,14 @@ class App(tk.Tk):
                     for p in paths:
                         p.points = [(x * scale, y * scale)
                                     for x, y in p.points]
+
+        # Optional origin offset (translate)
+        origin_x = params.get("origin_x", 0.0)
+        origin_y = params.get("origin_y", 0.0)
+        if (origin_x or origin_y) and paths:
+            for p in paths:
+                p.points = [(x + origin_x, y + origin_y) for x, y in p.points]
+
         return paths
 
     # ------------------------------------------------------------------
@@ -1164,6 +1290,50 @@ class App(tk.Tk):
             "they will be concatenated automatically.",
             parent=self,
         )
+
+    def _translate_gcode(self) -> None:
+        """Shift all X/Y coordinates in the current G-code by dx, dy."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Translate G-code")
+        dlg.configure(bg="#0d1a0d")
+        dlg.resizable(False, False)
+
+        _lbl = dict(bg="#0d1a0d", fg="#7abf7a", font=_MONO_SM)
+        _ent = dict(bg="#071407", fg="#00ff88", insertbackground="#00ff88",
+                    font=_MONO_SM, width=8, relief="flat")
+
+        tk.Label(dlg, text="Translate G-code (mm)", **_lbl).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
+        tk.Label(dlg, text="X offset:", **_lbl).grid(
+            row=1, column=0, sticky="w", padx=8, pady=2)
+        dx_var = tk.StringVar(value="0")
+        tk.Entry(dlg, textvariable=dx_var, **_ent).grid(
+            row=1, column=1, padx=8)
+        tk.Label(dlg, text="Y offset:", **_lbl).grid(
+            row=2, column=0, sticky="w", padx=8, pady=2)
+        dy_var = tk.StringVar(value="0")
+        tk.Entry(dlg, textvariable=dy_var, **_ent).grid(
+            row=2, column=1, padx=8)
+
+        def _ok():
+            try:
+                dx = float(dx_var.get())
+                dy = float(dy_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Invalid offset values.", parent=dlg)
+                return
+            dlg.destroy()
+            gcode = self._editor.get("1.0", "end-1c")
+            new_gcode = _apply_gcode_translate(gcode, dx, dy)
+            self._editor.delete("1.0", "end")
+            self._editor.insert("1.0", new_gcode)
+            self._reset_machine()
+            self._log.log(f"Translated G-code by dx={dx:.3f}  dy={dy:.3f} mm")
+
+        tk.Button(dlg, text="OK", command=_ok,
+                  bg="#1a4a1a", fg="#ccffcc", font=_MONO_SM).grid(
+            row=3, column=0, columnspan=2, pady=8)
+        dlg.bind("<Return>", lambda _: _ok())
 
     # ------------------------------------------------------------------
     # Tools menu actions

@@ -140,6 +140,26 @@ class DrawingDocument:
         except ValueError:
             pass
 
+    def translate_all(self, dx: float, dy: float) -> None:
+        """Shift every drawing object by (*dx*, *dy*) mm."""
+        for obj in self.objects:
+            if isinstance(obj, LineObj):
+                obj.x1 += dx
+                obj.y1 += dy
+                obj.x2 += dx
+                obj.y2 += dy
+            elif isinstance(obj, RectObj):
+                obj.x1 += dx
+                obj.y1 += dy
+                obj.x2 += dx
+                obj.y2 += dy
+            elif isinstance(obj, CircleObj):
+                obj.cx += dx
+                obj.cy += dy
+            elif isinstance(obj, TextObj):
+                obj.x += dx
+                obj.y += dy
+
 
 # ---------------------------------------------------------------------------
 # Geometry helpers

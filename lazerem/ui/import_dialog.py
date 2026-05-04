@@ -4,14 +4,17 @@ Shows a modal window whenever a file is imported (SVG, DXF, or raster image)
 so the user can configure:
 
 * Physical output size (width/height in mm)
+* X/Y origin offset (translate the imported design)
 * Toolpath type (Line, Fill/Raster, Hatch, Dithered, Greyscale, etc.)
 * Type-specific options (line spacing, angle, dithering algorithm, etc.)
 * Power (S) and speed (F)
+* A live preview canvas showing the design being imported
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+import math
+from typing import Dict, List, Optional, Tuple
 import tkinter as tk
 from tkinter import ttk
 
@@ -53,6 +56,13 @@ IMAGE_TOOLPATH_TYPES = [
     "Hatch Fill",
 ]
 
+# Preview canvas dimensions
+_PREV_W = 220
+_PREV_H = 180
+_PREV_BG = "#071407"
+_PREV_LINE = "#00cc66"
+_PREV_GRID = "#0f2a0f"
+
 
 class ImportParamsDialog(tk.Toplevel):
     """Modal dialog for configuring import parameters.
@@ -71,6 +81,11 @@ class ImportParamsDialog(tk.Toplevel):
         Initial laser power (S value).
     default_speed:
         Initial feed rate (mm/min).
+    preview_paths:
+        Optional list of point lists ``[(x, y), …]`` to render as a preview
+        (used for SVG / DXF imports).
+    preview_grid:
+        Optional 2-D list of grayscale float values (0–1) for image previews.
 
     After the dialog closes, inspect :attr:`result`.  It is ``None`` if the
     user cancelled, or a ``dict`` with these keys:
@@ -79,6 +94,8 @@ class ImportParamsDialog(tk.Toplevel):
     * ``width_mm`` – float (0 = keep original scale)
     * ``height_mm`` – float (0 = keep original scale / computed)
     * ``lock_ratio`` – bool
+    * ``origin_x`` – float (X translation offset in mm)
+    * ``origin_y`` – float (Y translation offset in mm)
     * ``power`` – float
     * ``speed`` – float
     * ``line_spacing`` – float  (Fill/Raster, Hatch)
@@ -105,6 +122,8 @@ class ImportParamsDialog(tk.Toplevel):
         img_h: int = 0,
         default_power: float = 500.0,
         default_speed: float = 3000.0,
+        preview_paths: Optional[List[List[Tuple[float, float]]]] = None,
+        preview_grid: Optional[List[List[float]]] = None,
     ) -> None:
         super().__init__(parent)
 
@@ -113,11 +132,13 @@ class ImportParamsDialog(tk.Toplevel):
         self._img_w = img_w
         self._img_h = img_h
         self._aspect: float = img_w / img_h if (img_w and img_h) else 1.0
+        self._preview_paths = preview_paths
+        self._preview_grid = preview_grid
 
         label = filename or import_type.upper()
         self.title(f"Import Parameters – {label}")
         self.configure(bg=_DARK_BG)
-        self.resizable(False, False)
+        self.resizable(True, True)
 
         self._build_ui(default_power, default_speed)
 
@@ -130,8 +151,27 @@ class ImportParamsDialog(tk.Toplevel):
     # ------------------------------------------------------------------
 
     def _build_ui(self, default_power: float, default_speed: float) -> None:
-        outer = tk.Frame(self, bg=_DARK_BG, padx=14, pady=10)
-        outer.pack(fill="both", expand=True)
+        # Top-level split: left = controls, right = preview
+        main_frame = tk.Frame(self, bg=_DARK_BG)
+        main_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        outer = tk.Frame(main_frame, bg=_DARK_BG, padx=14, pady=10)
+        outer.pack(side="left", fill="both")
+
+        # --- Preview panel (right side) ---
+        prev_frame = tk.Frame(main_frame, bg=_DARK_BG, padx=6, pady=10)
+        prev_frame.pack(side="left", fill="both", expand=True)
+        tk.Label(
+            prev_frame, text="PREVIEW", bg=_DARK_BG, fg=_LABEL_FG,
+            font=_MONO_SM,
+        ).pack(anchor="w")
+        self._prev_canvas = tk.Canvas(
+            prev_frame,
+            width=_PREV_W, height=_PREV_H,
+            bg=_PREV_BG, highlightthickness=1,
+            highlightbackground="#1a4a1a",
+        )
+        self._prev_canvas.pack(fill="both", expand=True)
 
         row = 0
 
@@ -173,6 +213,35 @@ class ImportParamsDialog(tk.Toplevel):
             activebackground=_DARK_BG, font=_MONO_SM,
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
         self._width_var.trace_add("write", self._on_width_change)
+        row += 1
+
+        # Separator
+        tk.Frame(outer, bg="#1a3a1a", height=1).grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=6)
+        row += 1
+
+        # --- Origin offset (translate) ---
+        tk.Label(outer, text="Origin Offset (mm)", bg=_DARK_BG, fg=_TITLE_FG,
+                 font=_MONO_SM).grid(row=row, column=0, columnspan=3,
+                                     sticky="w", pady=(0, 2))
+        row += 1
+
+        tk.Label(outer, text="X offset:", bg=_DARK_BG, fg=_LABEL_FG,
+                 font=_MONO_SM).grid(row=row, column=0, sticky="w")
+        self._origin_x_var = tk.StringVar(value="0")
+        tk.Entry(outer, textvariable=self._origin_x_var, width=8,
+                 **_ENTRY).grid(row=row, column=1, sticky="w", padx=(4, 2))
+        tk.Label(outer, text="mm", bg=_DARK_BG, fg=_LABEL_FG,
+                 font=_MONO_SM).grid(row=row, column=2, sticky="w")
+        row += 1
+
+        tk.Label(outer, text="Y offset:", bg=_DARK_BG, fg=_LABEL_FG,
+                 font=_MONO_SM).grid(row=row, column=0, sticky="w")
+        self._origin_y_var = tk.StringVar(value="0")
+        tk.Entry(outer, textvariable=self._origin_y_var, width=8,
+                 **_ENTRY).grid(row=row, column=1, sticky="w", padx=(4, 2))
+        tk.Label(outer, text="mm", bg=_DARK_BG, fg=_LABEL_FG,
+                 font=_MONO_SM).grid(row=row, column=2, sticky="w")
         row += 1
 
         # Separator
@@ -245,6 +314,9 @@ class ImportParamsDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda _: self._ok())
         self.bind("<Escape>", lambda _: self._cancel())
+
+        # Draw the preview after the window is ready
+        self.after(50, self._draw_preview)
 
     def _build_option_frames(self) -> None:
         """Pre-build all type-specific option frames inside ``_options_frame``."""
@@ -426,6 +498,123 @@ class ImportParamsDialog(tk.Toplevel):
             frame.grid(row=0, column=0, sticky="ew")
 
     # ------------------------------------------------------------------
+    # Preview rendering
+    # ------------------------------------------------------------------
+
+    def _draw_preview(self) -> None:
+        """Render a preview of the imported design in ``_prev_canvas``."""
+        c = self._prev_canvas
+        c.delete("all")
+        w = c.winfo_width() or _PREV_W
+        h = c.winfo_height() or _PREV_H
+        margin = 8
+
+        if self._preview_grid is not None:
+            self._draw_preview_image(c, w, h, margin)
+        elif self._preview_paths:
+            self._draw_preview_paths(c, w, h, margin)
+        else:
+            c.create_text(
+                w // 2, h // 2,
+                text="No preview available",
+                fill=_LABEL_FG, font=_MONO_SM,
+            )
+
+    def _draw_preview_paths(
+        self,
+        c: tk.Canvas,
+        w: int,
+        h: int,
+        margin: int,
+    ) -> None:
+        """Render vector path preview."""
+        paths = self._preview_paths
+        if not paths:
+            return
+
+        # Compute bounding box of all points
+        all_pts = [pt for path in paths for pt in path]
+        if not all_pts:
+            return
+        xs = [p[0] for p in all_pts]
+        ys = [p[1] for p in all_pts]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        span_x = max(max_x - min_x, 1e-6)
+        span_y = max(max_y - min_y, 1e-6)
+        avail_w = w - 2 * margin
+        avail_h = h - 2 * margin
+        scale = min(avail_w / span_x, avail_h / span_y)
+
+        cx_off = margin + (avail_w - span_x * scale) / 2
+        cy_off = margin + (avail_h - span_y * scale) / 2
+
+        def _tx(px: float) -> float:
+            return cx_off + (px - min_x) * scale
+
+        def _ty(py: float) -> float:
+            return cy_off + (max_y - py) * scale  # flip Y
+
+        for path in paths:
+            if len(path) < 2:
+                continue
+            pts_flat: List[float] = []
+            for px, py in path:
+                pts_flat += [_tx(px), _ty(py)]
+            if len(pts_flat) >= 4:
+                c.create_line(*pts_flat, fill=_PREV_LINE, width=1)
+
+    def _draw_preview_image(
+        self,
+        c: tk.Canvas,
+        w: int,
+        h: int,
+        margin: int,
+    ) -> None:
+        """Render a downsampled grayscale image preview."""
+        grid = self._preview_grid
+        if not grid:
+            return
+        gh = len(grid)
+        gw = len(grid[0]) if gh > 0 else 0
+        if gw == 0 or gh == 0:
+            return
+
+        avail_w = w - 2 * margin
+        avail_h = h - 2 * margin
+
+        # Target display dimensions (preserve aspect ratio, max avail)
+        aspect = gw / gh
+        if aspect > avail_w / max(avail_h, 1):
+            disp_w = avail_w
+            disp_h = max(1, int(avail_w / aspect))
+        else:
+            disp_h = avail_h
+            disp_w = max(1, int(avail_h * aspect))
+
+        x0 = margin + (avail_w - disp_w) // 2
+        y0 = margin + (avail_h - disp_h) // 2
+
+        # Build PhotoImage via put() rows
+        img = tk.PhotoImage(width=disp_w, height=disp_h)
+        for row_idx in range(disp_h):
+            src_row = int(row_idx * gh / disp_h)
+            src_row = min(src_row, gh - 1)
+            row_data = []
+            for col_idx in range(disp_w):
+                src_col = int(col_idx * gw / disp_w)
+                src_col = min(src_col, gw - 1)
+                v = int(max(0.0, min(1.0, grid[src_row][src_col])) * 255)
+                row_data.append(f"#{v:02x}{v:02x}{v:02x}")
+            c.put("{" + " ".join(row_data) + "}", to=(x0, y0 + row_idx))
+
+        # Keep a reference so it's not garbage-collected
+        c._preview_img = img  # type: ignore[attr-defined]
+        # Render using canvas image item
+        c.create_image(x0, y0, image=img, anchor="nw")
+
+    # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
 
@@ -459,6 +648,14 @@ class ImportParamsDialog(tk.Toplevel):
         except ValueError:
             height_mm = 0.0
         try:
+            origin_x = float(self._origin_x_var.get())
+        except ValueError:
+            origin_x = 0.0
+        try:
+            origin_y = float(self._origin_y_var.get())
+        except ValueError:
+            origin_y = 0.0
+        try:
             power = float(self._power_var.get())
         except ValueError:
             power = 500.0
@@ -484,6 +681,8 @@ class ImportParamsDialog(tk.Toplevel):
             "width_mm": width_mm,
             "height_mm": height_mm,
             "lock_ratio": self._lock_ratio_var.get(),
+            "origin_x": origin_x,
+            "origin_y": origin_y,
             "power": power,
             "speed": speed,
             # Fill / Raster
