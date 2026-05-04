@@ -12,6 +12,9 @@ Provides :class:`DrawingCanvas` – a ``tk.Canvas`` that supports:
   ``"text"``    – click to place a text label (prompts in a small dialog).
 
 * Real-time preview ghost while dragging.
+* Snap to existing object endpoints, midpoints, and centres (yellow
+  indicator; toggle via the ``snap_enabled`` property).
+* Undo (Ctrl+Z) for the last-added object.
 * Renders all objects in their layer colour; *no_cut* layers are shown with a
   dashed outline and reduced opacity to distinguish them from cutting layers.
 """
@@ -38,7 +41,10 @@ _AXIS = "#3a5a3a"
 _CURSOR = "#00ff88"
 _GHOST = "#446644"
 _HANDLE = "#00cc66"
+_SNAP = "#ffff00"          # yellow snap indicator
 _MONO_SM = ("Monospace", 9)
+
+_SNAP_TOL_MM = 3.0         # snap trigger distance in mm
 
 _TOOL_CURSORS = {
     "select": "arrow",
@@ -70,10 +76,17 @@ class DrawingCanvas(tk.Canvas):
         self._drag_start: Optional[Tuple[float, float]] = None  # world mm
         self._ghost_id: Optional[int] = None
         self._selected: Optional[object] = None
+        self._snap_pos: Optional[Tuple[float, float]] = None    # active snap pt
 
         # Pan state (middle-mouse or Ctrl+drag)
         self._pan_pixel_start: Optional[Tuple[int, int]] = None
         self._panning: bool = False
+
+        # Undo stack – stores objects added through canvas interaction
+        self._undo_stack: List = []
+
+        # Snap feature
+        self._snap_enabled: bool = True
 
         self.bind("<Configure>", lambda _: self.redraw())
         self.bind("<MouseWheel>", self._on_scroll)
@@ -88,6 +101,8 @@ class DrawingCanvas(tk.Canvas):
         self.bind("<Control-ButtonPress-1>", self._pan_start)
         self.bind("<Control-B1-Motion>", self._pan_move)
         self.bind("<Control-ButtonRelease-1>", self._pan_end)
+        self.bind("<Control-z>", lambda _: self._undo())
+        self.bind("<Control-Z>", lambda _: self._undo())
 
     # ------------------------------------------------------------------
     # Properties
@@ -110,6 +125,15 @@ class DrawingCanvas(tk.Canvas):
     @active_layer.setter
     def active_layer(self, idx: int) -> None:
         self._active_layer = max(0, idx)
+
+    @property
+    def snap_enabled(self) -> bool:
+        """Whether snap-to-point is active for drawing tools."""
+        return self._snap_enabled
+
+    @snap_enabled.setter
+    def snap_enabled(self, value: bool) -> None:
+        self._snap_enabled = bool(value)
 
     # ------------------------------------------------------------------
     # Coordinate helpers
@@ -138,12 +162,17 @@ class DrawingCanvas(tk.Canvas):
     def set_document(self, doc: DrawingDocument) -> None:
         self._doc = doc
         self._selected = None
+        self._undo_stack.clear()
         self.redraw()
 
     def clear_selection(self) -> None:
         """Deselect the currently selected drawing object."""
         self._selected = None
         self.redraw()
+
+    def clear_undo(self) -> None:
+        """Discard the entire undo history."""
+        self._undo_stack.clear()
 
     @property
     def selected_object(self):
@@ -191,6 +220,7 @@ class DrawingCanvas(tk.Canvas):
         self._draw_axes()
         self._draw_objects()
         self._draw_cursor_crosshair()
+        self._draw_snap_indicator()
 
     # ------------------------------------------------------------------
     # Grid / axes
@@ -241,6 +271,73 @@ class DrawingCanvas(tk.Canvas):
         self.create_line(ox, oy - r, ox, oy + r, fill=_CURSOR, width=2)
         self.create_oval(ox - 3, oy - 3, ox + 3, oy + 3,
                          outline=_CURSOR, width=1)
+
+    def _draw_snap_indicator(self) -> None:
+        """Draw a yellow diamond at the active snap point (if any)."""
+        if self._snap_pos is None:
+            return
+        cx, cy = self._to_canvas(*self._snap_pos)
+        r = 6
+        self.create_polygon(
+            cx, cy - r,
+            cx + r, cy,
+            cx, cy + r,
+            cx - r, cy,
+            outline=_SNAP, fill="", width=2,
+        )
+
+    # ------------------------------------------------------------------
+    # Snap helpers
+    # ------------------------------------------------------------------
+
+    def _get_snap_points(self) -> List[Tuple[float, float]]:
+        """Collect all snap candidates (endpoints, midpoints, centres)."""
+        pts: List[Tuple[float, float]] = []
+        for obj in self._doc.objects:
+            if isinstance(obj, LineObj):
+                pts.append((obj.x1, obj.y1))
+                pts.append((obj.x2, obj.y2))
+                pts.append(((obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2))
+            elif isinstance(obj, RectObj):
+                pts.append((obj.x1, obj.y1))
+                pts.append((obj.x2, obj.y1))
+                pts.append((obj.x2, obj.y2))
+                pts.append((obj.x1, obj.y2))
+                pts.append(((obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2))
+            elif isinstance(obj, CircleObj):
+                pts.append((obj.cx, obj.cy))
+            elif isinstance(obj, TextObj):
+                pts.append((obj.x, obj.y))
+        return pts
+
+    def _snap_to(self, wx: float, wy: float) -> Tuple[float, float]:
+        """Return the nearest snap point within tolerance, else (wx, wy)."""
+        if not self._snap_enabled:
+            self._snap_pos = None
+            return wx, wy
+        best_d = _SNAP_TOL_MM
+        best: Optional[Tuple[float, float]] = None
+        for sx, sy in self._get_snap_points():
+            d = math.hypot(wx - sx, wy - sy)
+            if d < best_d:
+                best_d = d
+                best = (sx, sy)
+        self._snap_pos = best
+        return best if best is not None else (wx, wy)
+
+    # ------------------------------------------------------------------
+    # Undo
+    # ------------------------------------------------------------------
+
+    def _undo(self) -> None:
+        """Remove the most recently added object (Ctrl+Z)."""
+        if not self._undo_stack:
+            return
+        obj = self._undo_stack.pop()
+        self._doc.remove_object(obj)
+        if self._selected is obj:
+            self._selected = None
+        self.redraw()
 
     # ------------------------------------------------------------------
     # Object rendering
@@ -368,20 +465,25 @@ class DrawingCanvas(tk.Canvas):
             self.redraw()
             return
         if self._tool == "text":
+            wx, wy = self._snap_to(wx, wy)
             self._place_text(wx, wy)
             return
+        wx, wy = self._snap_to(wx, wy)
         self._drag_start = (wx, wy)
 
     def _on_drag(self, event: tk.Event) -> None:
         if self._panning or self._drag_start is None:
             return
         wx, wy = self._to_world(event.x, event.y)
+        wx, wy = self._snap_to(wx, wy)
         self._update_ghost(self._drag_start, (wx, wy))
 
     def _on_release(self, event: tk.Event) -> None:
         if self._panning or self._drag_start is None:
             return
         wx, wy = self._to_world(event.x, event.y)
+        wx, wy = self._snap_to(wx, wy)
+        self._snap_pos = None
         start = self._drag_start
         self._drag_start = None
         # Remove ghost
@@ -417,16 +519,20 @@ class DrawingCanvas(tk.Canvas):
         idx = min(self._active_layer, len(self._doc.layers) - 1)
         x1, y1 = start
         x2, y2 = end
+        obj = None
         if self._tool == "line":
             if math.hypot(x2 - x1, y2 - y1) > 0.01:
-                self._doc.add_object(LineObj(idx, x1, y1, x2, y2))
+                obj = LineObj(idx, x1, y1, x2, y2)
         elif self._tool == "rect":
             if abs(x2 - x1) > 0.01 and abs(y2 - y1) > 0.01:
-                self._doc.add_object(RectObj(idx, x1, y1, x2, y2))
+                obj = RectObj(idx, x1, y1, x2, y2)
         elif self._tool == "circle":
             r = math.hypot(x2 - x1, y2 - y1)
             if r > 0.01:
-                self._doc.add_object(CircleObj(idx, x1, y1, r))
+                obj = CircleObj(idx, x1, y1, r)
+        if obj is not None:
+            self._doc.add_object(obj)
+            self._undo_stack.append(obj)
         self.redraw()
 
     def _place_text(self, wx: float, wy: float) -> None:
@@ -438,7 +544,9 @@ class DrawingCanvas(tk.Canvas):
             "Text", "Enter text to engrave:", parent=self
         )
         if text:
-            self._doc.add_object(TextObj(idx, wx, wy, text))
+            obj = TextObj(idx, wx, wy, text)
+            self._doc.add_object(obj)
+            self._undo_stack.append(obj)
         self.redraw()
 
     # ------------------------------------------------------------------

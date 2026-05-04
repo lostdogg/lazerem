@@ -100,6 +100,55 @@ class TestDrawingDocument:
         obj = LineObj(layer_idx=0, x1=0, y1=0, x2=1, y2=1)
         doc.remove_object(obj)  # Should not raise
 
+    def test_translate_all_line(self):
+        doc = self._doc_with_one_layer()
+        obj = LineObj(layer_idx=0, x1=1, y1=2, x2=3, y2=4)
+        doc.add_object(obj)
+        doc.translate_all(10, 5)
+        assert obj.x1 == pytest.approx(11)
+        assert obj.y1 == pytest.approx(7)
+        assert obj.x2 == pytest.approx(13)
+        assert obj.y2 == pytest.approx(9)
+
+    def test_translate_all_rect(self):
+        doc = self._doc_with_one_layer()
+        obj = RectObj(layer_idx=0, x1=0, y1=0, x2=10, y2=10)
+        doc.add_object(obj)
+        doc.translate_all(3, -2)
+        assert obj.x1 == pytest.approx(3)
+        assert obj.y1 == pytest.approx(-2)
+        assert obj.x2 == pytest.approx(13)
+        assert obj.y2 == pytest.approx(8)
+
+    def test_translate_all_circle(self):
+        doc = self._doc_with_one_layer()
+        obj = CircleObj(layer_idx=0, cx=5, cy=5, r=3)
+        doc.add_object(obj)
+        doc.translate_all(-5, -5)
+        assert obj.cx == pytest.approx(0)
+        assert obj.cy == pytest.approx(0)
+
+    def test_translate_all_text(self):
+        doc = self._doc_with_one_layer()
+        obj = TextObj(layer_idx=0, x=0, y=0, text="A")
+        doc.add_object(obj)
+        doc.translate_all(7, 3)
+        assert obj.x == pytest.approx(7)
+        assert obj.y == pytest.approx(3)
+
+    def test_translate_all_zero_is_noop(self):
+        doc = self._doc_with_one_layer()
+        obj = LineObj(layer_idx=0, x1=1, y1=2, x2=3, y2=4)
+        doc.add_object(obj)
+        doc.translate_all(0, 0)
+        assert obj.x1 == pytest.approx(1)
+        assert obj.y1 == pytest.approx(2)
+
+    def test_translate_all_empty_doc_no_error(self):
+        doc = DrawingDocument()
+        doc.add_layer("L")
+        doc.translate_all(5, 5)  # Should not raise
+
 
 # ---------------------------------------------------------------------------
 # drawing_to_paths
