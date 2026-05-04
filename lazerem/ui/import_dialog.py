@@ -607,11 +607,10 @@ class ImportParamsDialog(tk.Toplevel):
                 src_col = min(src_col, gw - 1)
                 v = int(max(0.0, min(1.0, grid[src_row][src_col])) * 255)
                 row_data.append(f"#{v:02x}{v:02x}{v:02x}")
-            c.put("{" + " ".join(row_data) + "}", to=(x0, y0 + row_idx))
+            img.put("{" + " ".join(row_data) + "}", to=(0, row_idx))
 
-        # Keep a reference so it's not garbage-collected
+        # Keep a reference so it's not garbage-collected, then render
         c._preview_img = img  # type: ignore[attr-defined]
-        # Render using canvas image item
         c.create_image(x0, y0, image=img, anchor="nw")
 
     # ------------------------------------------------------------------
